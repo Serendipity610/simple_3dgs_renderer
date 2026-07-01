@@ -14,9 +14,9 @@ layout(std430, set = 0, binding = 0) readonly buffer GaussianBuffer {
 
 layout(push_constant) uniform CameraState {
     mat4 viewProjection;
-    vec2 viewportSize;
-    vec2 padding;
+    vec4 viewportSizeAndFocalLength;
     vec4 cameraPosition;
+    vec4 cameraTarget;
 } camera;
 
 layout(location = 0) out vec2 localPosition;
@@ -25,6 +25,97 @@ layout(location = 1) out vec4 splatColor;
 const vec2 corners[6] = vec2[](
     vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
     vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));
+
+mat3 quaternionRotation(vec4 quaternion)
+{
+    float normSquared = dot(quaternion, quaternion);
+    if (normSquared <= 1.0e-12) {
+        return mat3(1.0);
+    }
+    vec4 q = quaternion * inversesqrt(normSquared);
+    float w = q.x;
+    float x = q.y;
+    float y = q.z;
+    float z = q.w;
+    return mat3(
+        vec3(1.0 - 2.0 * (y * y + z * z),
+             2.0 * (x * y + w * z),
+             2.0 * (x * z - w * y)),
+        vec3(2.0 * (x * y - w * z),
+             1.0 - 2.0 * (x * x + z * z),
+             2.0 * (y * z + w * x)),
+        vec3(2.0 * (x * z + w * y),
+             2.0 * (y * z - w * x),
+             1.0 - 2.0 * (x * x + y * y)));
+}
+
+mat3 worldCovariance(Gaussian gaussian)
+{
+    vec3 scale = exp(clamp(gaussian.scale.xyz, vec3(-20.0), vec3(20.0)));
+    mat3 scaleSquared = mat3(
+        vec3(scale.x * scale.x, 0.0, 0.0),
+        vec3(0.0, scale.y * scale.y, 0.0),
+        vec3(0.0, 0.0, scale.z * scale.z));
+    mat3 rotation = quaternionRotation(gaussian.rotation);
+    return rotation * scaleSquared * transpose(rotation);
+}
+
+mat3 worldToCameraBasis()
+{
+    vec3 forward = normalize(camera.cameraTarget.xyz - camera.cameraPosition.xyz);
+    vec3 side = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+    vec3 up = cross(side, forward);
+    return transpose(mat3(side, up, forward));
+}
+
+vec3 projectedCovariance(mat3 covariance, vec3 cameraPosition)
+{
+    float depth = max(cameraPosition.z, 1.0e-4);
+    float inverseDepth = 1.0 / depth;
+    float inverseDepthSquared = inverseDepth * inverseDepth;
+    float focalX = camera.viewportSizeAndFocalLength.z;
+    float focalY = camera.viewportSizeAndFocalLength.w;
+
+    // Gradients of pixel coordinates
+    // u = fx * x / z and v = -fy * y / z.
+    vec3 gradientX = vec3(focalX * inverseDepth, 0.0,
+                          -focalX * cameraPosition.x * inverseDepthSquared);
+    vec3 gradientY = vec3(0.0, -focalY * inverseDepth,
+                          focalY * cameraPosition.y * inverseDepthSquared);
+    float varianceX = dot(gradientX, covariance * gradientX);
+    float covarianceXY = dot(gradientX, covariance * gradientY);
+    float varianceY = dot(gradientY, covariance * gradientY);
+
+    // A small pixel-space low-pass term keeps sub-pixel covariance invertible.
+    return vec3(max(varianceX + 0.3, 0.3), covarianceXY,
+                max(varianceY + 0.3, 0.3));
+}
+
+void ellipseAxes(vec3 covariance, out vec2 majorAxis, out vec2 minorAxis)
+{
+    float varianceX = covariance.x;
+    float covarianceXY = covariance.y;
+    float varianceY = covariance.z;
+    float midpoint = 0.5 * (varianceX + varianceY);
+    float radius = sqrt(max(0.0,
+        0.25 * (varianceX - varianceY) * (varianceX - varianceY) +
+        covarianceXY * covarianceXY));
+    float majorEigenvalue = max(midpoint + radius, 0.3);
+    float minorEigenvalue = max(midpoint - radius, 0.3);
+
+    vec2 majorDirection;
+    if (abs(covarianceXY) > 1.0e-6) {
+        majorDirection = normalize(vec2(covarianceXY,
+                                        majorEigenvalue - varianceX));
+    } else {
+        majorDirection = varianceX >= varianceY ? vec2(1.0, 0.0)
+                                                 : vec2(0.0, 1.0);
+    }
+    vec2 minorDirection = vec2(-majorDirection.y, majorDirection.x);
+    const float sigmaExtent = 3.0;
+    majorAxis = majorDirection * sigmaExtent * sqrt(majorEigenvalue);
+    minorAxis = minorDirection * sigmaExtent * sqrt(minorEigenvalue);
+}
 
 float readShCoefficient(uint gaussianIndex, int valueIndex)
 {
@@ -97,9 +188,25 @@ void main()
     Gaussian gaussian = gaussians[gl_InstanceIndex];
     vec2 corner = corners[gl_VertexIndex];
     vec4 center = camera.viewProjection * vec4(gaussian.positionOpacity.xyz, 1.0);
-    float pixelRadius = clamp(exp(max(gaussian.scale.x, gaussian.scale.y)) *
-                              700.0 / max(center.w, 0.01), 1.0, 180.0);
-    vec2 ndcOffset = corner * pixelRadius * 2.0 / camera.viewportSize;
+    mat3 cameraBasis = worldToCameraBasis();
+    vec3 centerInCamera = cameraBasis *
+                          (gaussian.positionOpacity.xyz - camera.cameraPosition.xyz);
+    if (centerInCamera.z <= 0.05 || center.w <= 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        localPosition = corner;
+        splatColor = vec4(0.0);
+        return;
+    }
+
+    mat3 covarianceInCamera = cameraBasis * worldCovariance(gaussian) *
+                              transpose(cameraBasis);
+    vec3 covariance2D = projectedCovariance(covarianceInCamera, centerInCamera);
+    vec2 majorAxis;
+    vec2 minorAxis;
+    ellipseAxes(covariance2D, majorAxis, minorAxis);
+    vec2 pixelOffset = corner.x * majorAxis + corner.y * minorAxis;
+    vec2 ndcOffset = pixelOffset * 2.0 /
+                     camera.viewportSizeAndFocalLength.xy;
     gl_Position = center;
     gl_Position.xy += ndcOffset * center.w;
     localPosition = corner;

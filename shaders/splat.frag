@@ -11,7 +11,8 @@ void main()
     if (radiusSquared > 1.0) {
         discard;
     }
-    float gaussianWeight = exp(-4.0 * radiusSquared);
+    // localPosition reaches one at the three-sigma ellipse boundary.
+    float gaussianWeight = exp(-4.5 * radiusSquared);
     float opacity = 1.0 / (1.0 + exp(-splatColor.a));
     outputColor = vec4(splatColor.rgb, opacity * gaussianWeight);
 }

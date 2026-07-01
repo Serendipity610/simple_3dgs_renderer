@@ -54,11 +54,12 @@ struct SwapchainSupport {
 
 struct CameraPushConstants {
     std::array<float, 16> viewProjection {};
-    std::array<float, 4> viewportSizeAndPadding {};
+    std::array<float, 4> viewportSizeAndFocalLength {};
     std::array<float, 4> cameraPositionAndPadding {};
+    std::array<float, 4> cameraTargetAndPadding {};
 };
 
-static_assert(sizeof(CameraPushConstants) == 96);
+static_assert(sizeof(CameraPushConstants) == 112);
 
 class VulkanApplication {
 public:
@@ -807,12 +808,18 @@ private:
         cameraState.viewProjection = camera_.ViewProjection(
             static_cast<float>(swapchainExtent_.width) /
             static_cast<float>(swapchainExtent_.height));
-        cameraState.viewportSizeAndPadding = {static_cast<float>(swapchainExtent_.width),
-                                              static_cast<float>(swapchainExtent_.height),
-                                              0.0F, 0.0F};
+        const float viewportWidth = static_cast<float>(swapchainExtent_.width);
+        const float viewportHeight = static_cast<float>(swapchainExtent_.height);
+        const auto focalLength =
+            camera_.FocalLengthPixels(viewportWidth, viewportHeight);
+        cameraState.viewportSizeAndFocalLength = {
+            viewportWidth, viewportHeight, focalLength[0], focalLength[1]};
         const auto cameraPosition = camera_.Position();
         cameraState.cameraPositionAndPadding = {cameraPosition[0], cameraPosition[1],
                                                 cameraPosition[2], 0.0F};
+        const auto& cameraTarget = camera_.Target();
+        cameraState.cameraTargetAndPadding = {cameraTarget[0], cameraTarget[1],
+                                              cameraTarget[2], 0.0F};
         vkCmdPushConstants(commandBuffer, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(cameraState), &cameraState);
         vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(gaussianBuffer_.Count()), 0, 0);

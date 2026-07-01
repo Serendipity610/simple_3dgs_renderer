@@ -11,6 +11,8 @@ public:
     void Move(float forward, float right) noexcept;
 
     [[nodiscard]] std::array<float, 3> Position() const noexcept;
+    [[nodiscard]] std::array<float, 2> FocalLengthPixels(float viewportWidth,
+                                                         float viewportHeight) const;
     [[nodiscard]] std::array<float, 16> ViewProjection(float aspectRatio) const;
     [[nodiscard]] const std::array<float, 3>& Target() const noexcept { return target_; }
     [[nodiscard]] float Distance() const noexcept { return distance_; }

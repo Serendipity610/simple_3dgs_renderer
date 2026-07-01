@@ -10,6 +10,13 @@ namespace {
 using Vec3 = std::array<float, 3>;
 using Mat4 = std::array<float, 16>;
 
+constexpr float kVerticalFieldOfView = 0.7853981633974483F;
+
+[[nodiscard]] float ProjectionFocalLength()
+{
+    return 1.0F / std::tan(kVerticalFieldOfView * 0.5F);
+}
+
 [[nodiscard]] Vec3 Subtract(const Vec3& left, const Vec3& right)
 {
     return {left[0] - right[0], left[1] - right[1], left[2] - right[2]};
@@ -52,10 +59,9 @@ using Mat4 = std::array<float, 16>;
     if (!std::isfinite(aspectRatio) || aspectRatio <= 0.0F) {
         throw std::runtime_error("camera aspect ratio must be positive");
     }
-    constexpr float kVerticalFieldOfView = 0.7853981633974483F;
     constexpr float kNear = 0.05F;
     constexpr float kFar = 1000.0F;
-    const float focalLength = 1.0F / std::tan(kVerticalFieldOfView * 0.5F);
+    const float focalLength = ProjectionFocalLength();
     Mat4 result {};
     result[0] = focalLength / aspectRatio;
     result[5] = -focalLength;
@@ -110,6 +116,19 @@ std::array<float, 3> Camera::Position() const noexcept
     return {target_[0] + horizontalDistance * std::sin(yaw_),
             target_[1] + distance_ * std::sin(pitch_),
             target_[2] + horizontalDistance * std::cos(yaw_)};
+}
+
+std::array<float, 2> Camera::FocalLengthPixels(float viewportWidth,
+                                                float viewportHeight) const
+{
+    if (!std::isfinite(viewportWidth) || !std::isfinite(viewportHeight) ||
+        viewportWidth <= 0.0F || viewportHeight <= 0.0F) {
+        throw std::runtime_error("camera viewport dimensions must be positive");
+    }
+    const float aspectRatio = viewportWidth / viewportHeight;
+    const float focalLength = ProjectionFocalLength();
+    return {focalLength / aspectRatio * viewportWidth * 0.5F,
+            focalLength * viewportHeight * 0.5F};
 }
 
 std::array<float, 16> Camera::ViewProjection(float aspectRatio) const

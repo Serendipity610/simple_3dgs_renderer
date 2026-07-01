@@ -8,6 +8,7 @@ Win32 窗口后端，可加载 Gaussian PLY 数据、上传到 GPU，并以实�
 - 读取 ASCII、binary little-endian 和 binary big-endian PLY 1.0 文件
 - 解析 position、scale、rotation、opacity、RGB 和 0–3 阶球谐颜色
 - 使用 staging buffer 将 Gaussian 数据上传到 GPU storage buffer
+- 将三维 covariance 透视投影为屏幕空间各向异性椭圆 splat
 - 使用 Vulkan swapchain 和 alpha blending 渲染屏幕空间 splat
 - 支持窗口缩放及 swapchain 重建
 - 支持鼠标和键盘相机控制

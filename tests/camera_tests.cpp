@@ -41,6 +41,19 @@ void TestCameraControls()
             }),
             "camera position must be finite");
 
+    const auto focalLength = camera.FocalLengthPixels(1280.0F, 720.0F);
+    Require(focalLength[0] > 0.0F && focalLength[1] > 0.0F,
+            "pixel focal lengths must be positive");
+    Require(std::abs(focalLength[0] - focalLength[1]) < 1.0e-3F,
+            "square pixels must use matching focal lengths");
+    bool rejectedViewport = false;
+    try {
+        static_cast<void>(camera.FocalLengthPixels(1280.0F, 0.0F));
+    } catch (const std::runtime_error&) {
+        rejectedViewport = true;
+    }
+    Require(rejectedViewport, "zero viewport height must be rejected");
+
     const auto matrix = camera.ViewProjection(16.0F / 9.0F);
     Require(std::all_of(matrix.begin(), matrix.end(), [](float value) {
                 return std::isfinite(value);
