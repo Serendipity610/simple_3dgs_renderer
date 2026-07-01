@@ -104,13 +104,17 @@ void Camera::Move(float forward, float right) noexcept
     }
 }
 
-std::array<float, 16> Camera::ViewProjection(float aspectRatio) const
+std::array<float, 3> Camera::Position() const noexcept
 {
     const float horizontalDistance = distance_ * std::cos(pitch_);
-    const Vec3 eye {target_[0] + horizontalDistance * std::sin(yaw_),
-                    target_[1] + distance_ * std::sin(pitch_),
-                    target_[2] + horizontalDistance * std::cos(yaw_)};
-    return Multiply(Perspective(aspectRatio), LookAt(eye, target_));
+    return {target_[0] + horizontalDistance * std::sin(yaw_),
+            target_[1] + distance_ * std::sin(pitch_),
+            target_[2] + horizontalDistance * std::cos(yaw_)};
+}
+
+std::array<float, 16> Camera::ViewProjection(float aspectRatio) const
+{
+    return Multiply(Perspective(aspectRatio), LookAt(Position(), target_));
 }
 
 } // namespace simple_3dgs

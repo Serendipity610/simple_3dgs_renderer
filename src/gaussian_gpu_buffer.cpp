@@ -142,7 +142,12 @@ GpuGaussian ToGpuGaussian(const Gaussian& gaussian)
                               gaussian.position[2], gaussian.opacity};
     result.scale = {gaussian.scale[0], gaussian.scale[1], gaussian.scale[2], 0.0F};
     result.rotation = gaussian.rotation;
-    result.color = {gaussian.color[0], gaussian.color[1], gaussian.color[2], 1.0F};
+    result.color = {gaussian.color[0], gaussian.color[1], gaussian.color[2],
+                    static_cast<float>(gaussian.shDegree)};
+    for (size_t index = 0; index < gaussian.shCoefficients.size(); ++index) {
+        result.sphericalHarmonics[index / 4][index % 4] =
+            gaussian.shCoefficients[index];
+    }
     return result;
 }
 

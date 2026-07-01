@@ -15,6 +15,7 @@ struct alignas(16) GpuGaussian {
     std::array<float, 4> scale {};
     std::array<float, 4> rotation {};
     std::array<float, 4> color {};
+    std::array<std::array<float, 4>, kShCoefficientCount / 4> sphericalHarmonics {};
 };
 
 [[nodiscard]] GpuGaussian ToGpuGaussian(const Gaussian& gaussian);
@@ -47,6 +48,6 @@ private:
     size_t count_ = 0;
 };
 
-static_assert(sizeof(GpuGaussian) == 64);
+static_assert(sizeof(GpuGaussian) == 256);
 
 } // namespace simple_3dgs

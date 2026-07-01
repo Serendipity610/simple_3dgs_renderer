@@ -75,6 +75,7 @@ void TestAsciiRgb()
     RequireNear(gaussians[0].color[0], 1.0F, "ASCII red");
     RequireNear(gaussians[0].color[1], 64.0F / 255.0F, "ASCII green");
     RequireNear(gaussians[2].color[2], 1.0F, "ASCII blue");
+    Require(gaussians[0].shDegree == -1, "direct RGB must disable SH evaluation");
 }
 
 void TestBinarySh(bool bigEndian)
@@ -91,13 +92,19 @@ void TestBinarySh(bool bigEndian)
                   "property float rot_0\nproperty float rot_1\n"
                   "property float rot_2\nproperty float rot_3\n"
                   "property float opacity\n"
-                  "property float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\n"
-                  "end_header\n";
+                  "property float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\n";
+        for (size_t index = 0; index < 45; ++index) {
+            output << "property float f_rest_" << index << '\n';
+        }
+        output << "end_header\n";
         const std::array<float, 14> values = {
             1.25F, -2.5F, 3.75F, -1.0F, -2.0F, -3.0F, 1.0F,
             0.0F, 0.0F, 0.0F, 2.0F, 0.0F, 1.0F, -1.0F};
         for (float value : values) {
             WriteBinary(output, value, bigEndian);
+        }
+        for (size_t index = 0; index < 45; ++index) {
+            WriteBinary(output, static_cast<float>(index + 1), bigEndian);
         }
     }
 
@@ -111,6 +118,19 @@ void TestBinarySh(bool bigEndian)
                 "binary SH green");
     RequireNear(gaussians[0].color[2], 0.5F - 0.28209479177387814F,
                 "binary SH blue");
+    Require(gaussians[0].shDegree == 3, "complete SH coefficients select degree 3");
+    RequireNear(gaussians[0].shCoefficients[0], 0.0F, "SH DC red mapping");
+    RequireNear(gaussians[0].shCoefficients[1], 1.0F, "SH DC green mapping");
+    RequireNear(gaussians[0].shCoefficients[2], -1.0F, "SH DC blue mapping");
+    RequireNear(gaussians[0].shCoefficients[3], 1.0F, "SH degree 1 red mapping");
+    RequireNear(gaussians[0].shCoefficients[4], 16.0F,
+                "SH degree 1 green mapping");
+    RequireNear(gaussians[0].shCoefficients[5], 31.0F,
+                "SH degree 1 blue mapping");
+    RequireNear(gaussians[0].shCoefficients[45], 15.0F,
+                "SH degree 3 red mapping");
+    RequireNear(gaussians[0].shCoefficients[47], 45.0F,
+                "SH degree 3 blue mapping");
 }
 
 void TestRejectsMissingPosition()

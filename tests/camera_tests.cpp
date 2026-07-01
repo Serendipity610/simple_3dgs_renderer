@@ -35,6 +35,12 @@ void TestCameraControls()
     const auto after = camera.Target();
     Require(before != after, "WASD movement must translate the target");
 
+    const auto position = camera.Position();
+    Require(std::all_of(position.begin(), position.end(), [](float value) {
+                return std::isfinite(value);
+            }),
+            "camera position must be finite");
+
     const auto matrix = camera.ViewProjection(16.0F / 9.0F);
     Require(std::all_of(matrix.begin(), matrix.end(), [](float value) {
                 return std::isfinite(value);

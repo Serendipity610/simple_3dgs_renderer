@@ -189,6 +189,10 @@ void TestUploadAndLifecycle()
     first.scale = {-1.0F, -2.0F, -3.0F};
     first.opacity = 0.25F;
     first.color = {0.1F, 0.2F, 0.3F};
+    first.shDegree = 3;
+    for (size_t index = 0; index < first.shCoefficients.size(); ++index) {
+        first.shCoefficients[index] = static_cast<float>(index) * 0.125F;
+    }
     simple_3dgs::Gaussian second;
     second.position = {-4.0F, 5.0F, 6.0F};
     second.rotation = {0.5F, 0.5F, 0.5F, 0.5F};
@@ -206,6 +210,12 @@ void TestUploadAndLifecycle()
     Require(std::abs(uploaded[0].positionOpacity[3] - 0.25F) < 1.0e-6F,
             "uploaded opacity");
     Require(std::abs(uploaded[0].color[1] - 0.2F) < 1.0e-6F, "uploaded color");
+    Require(std::abs(uploaded[0].color[3] - 3.0F) < 1.0e-6F,
+            "uploaded SH degree");
+    Require(std::abs(uploaded[0].sphericalHarmonics[0][3] - 0.375F) < 1.0e-6F,
+            "uploaded first SH block");
+    Require(std::abs(uploaded[0].sphericalHarmonics[11][3] - 5.875F) < 1.0e-6F,
+            "uploaded last SH block");
     Require(std::abs(uploaded[1].rotation[3] - 0.5F) < 1.0e-6F,
             "uploaded rotation");
 

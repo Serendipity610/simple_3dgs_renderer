@@ -255,9 +255,39 @@ struct VertexAccumulator {
     Gaussian gaussian;
     std::array<bool, 3> hasPosition {false, false, false};
     std::array<bool, 3> hasDirectColor {false, false, false};
-    std::array<bool, 3> hasShColor {false, false, false};
-    std::array<float, 3> shColor {};
+    std::array<bool, kShCoefficientCount> hasShCoefficient {};
 };
+
+void AssignShRestProperty(VertexAccumulator& vertex, const std::string& name,
+                          double value)
+{
+    constexpr size_t kPrefixLength = 7;
+    if (name.size() <= kPrefixLength) {
+        throw std::runtime_error("invalid PLY SH property: " + name);
+    }
+    size_t propertyIndex = 0;
+    for (size_t index = kPrefixLength; index < name.size(); ++index) {
+        const char digit = name[index];
+        if (digit < '0' || digit > '9') {
+            throw std::runtime_error("invalid PLY SH property: " + name);
+        }
+        propertyIndex = propertyIndex * 10 + static_cast<size_t>(digit - '0');
+    }
+    constexpr size_t kRestCoefficientsPerChannel = kShCoefficientsPerChannel - 1;
+    constexpr size_t kRestCoefficientCount =
+        kRestCoefficientsPerChannel * kShChannelCount;
+    if (propertyIndex >= kRestCoefficientCount) {
+        throw std::runtime_error("PLY SH property exceeds degree 3: " + name);
+    }
+
+    // The reference 3DGS PLY layout stores f_rest channel-major. Convert it to
+    // coefficient-major RGB for contiguous shader access.
+    const size_t channel = propertyIndex / kRestCoefficientsPerChannel;
+    const size_t coefficient = propertyIndex % kRestCoefficientsPerChannel + 1;
+    const size_t targetIndex = coefficient * kShChannelCount + channel;
+    vertex.gaussian.shCoefficients[targetIndex] = ToFloat(value, name);
+    vertex.hasShCoefficient[targetIndex] = true;
+}
 
 void AssignVertexProperty(VertexAccumulator& vertex, const Property& property, double value)
 {
@@ -294,9 +324,11 @@ void AssignVertexProperty(VertexAccumulator& vertex, const Property& property, d
         vertex.gaussian.color[2] = NormalizeColor(value, property.valueType, name);
         vertex.hasDirectColor[2] = true;
     } else if (name == "f_dc_0" || name == "f_dc_1" || name == "f_dc_2") {
-        const size_t index = static_cast<size_t>(name.back() - '0');
-        vertex.shColor[index] = ToFloat(value, name);
-        vertex.hasShColor[index] = true;
+        const size_t channel = static_cast<size_t>(name.back() - '0');
+        vertex.gaussian.shCoefficients[channel] = ToFloat(value, name);
+        vertex.hasShCoefficient[channel] = true;
+    } else if (name.compare(0, 7, "f_rest_") == 0) {
+        AssignShRestProperty(vertex, name, value);
     }
 }
 
@@ -307,10 +339,36 @@ void AssignVertexProperty(VertexAccumulator& vertex, const Property& property, d
         throw std::runtime_error("PLY vertex is missing x, y, or z");
     }
     constexpr float kShC0 = 0.28209479177387814F;
-    for (size_t index = 0; index < vertex.gaussian.color.size(); ++index) {
-        if (!vertex.hasDirectColor[index] && vertex.hasShColor[index]) {
-            vertex.gaussian.color[index] =
-                std::clamp(0.5F + kShC0 * vertex.shColor[index], 0.0F, 1.0F);
+    for (size_t channel = 0; channel < vertex.gaussian.color.size(); ++channel) {
+        if (!vertex.hasDirectColor[channel] && vertex.hasShCoefficient[channel]) {
+            vertex.gaussian.color[channel] = std::clamp(
+                0.5F + kShC0 * vertex.gaussian.shCoefficients[channel], 0.0F,
+                1.0F);
+        }
+    }
+
+    const bool hasDirectColor = std::any_of(
+        vertex.hasDirectColor.begin(), vertex.hasDirectColor.end(),
+        [](bool present) { return present; });
+    const bool hasCompleteDc = std::all_of(
+        vertex.hasShCoefficient.begin(),
+        vertex.hasShCoefficient.begin() + static_cast<ptrdiff_t>(kShChannelCount),
+        [](bool present) { return present; });
+    if (!hasDirectColor && hasCompleteDc) {
+        vertex.gaussian.shDegree = 0;
+        for (int32_t degree = 1; degree <= 3; ++degree) {
+            const size_t coefficientCount =
+                static_cast<size_t>((degree + 1) * (degree + 1));
+            const size_t requiredValueCount = coefficientCount * kShChannelCount;
+            const bool complete = std::all_of(
+                vertex.hasShCoefficient.begin(),
+                vertex.hasShCoefficient.begin() +
+                    static_cast<ptrdiff_t>(requiredValueCount),
+                [](bool present) { return present; });
+            if (!complete) {
+                break;
+            }
+            vertex.gaussian.shDegree = degree;
         }
     }
     return vertex.gaussian;

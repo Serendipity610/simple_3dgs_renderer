@@ -6,7 +6,7 @@ Win32 窗口后端，可加载 Gaussian PLY 数据、上传到 GPU，并以实�
 ## 当前功能
 
 - 读取 ASCII、binary little-endian 和 binary big-endian PLY 1.0 文件
-- 解析 position、scale、rotation、opacity、RGB 和零阶球谐颜色
+- 解析 position、scale、rotation、opacity、RGB 和 0–3 阶球谐颜色
 - 使用 staging buffer 将 Gaussian 数据上传到 GPU storage buffer
 - 使用 Vulkan swapchain 和 alpha blending 渲染屏幕空间 splat
 - 支持窗口缩放及 swapchain 重建
@@ -88,10 +88,10 @@ build/Debug/simple_3dgs_engine.exe
 | Rotation | `rot_0..3`、`rotation_w/x/y/z` 或 `rw/rx/ry/rz` |
 | Opacity | `opacity` 或 `alpha` |
 | RGB | `red/green/blue`、`r/g/b` 或 `color_0..2` |
-| 零阶球谐颜色 | `f_dc_0..2` |
+| 球谐颜色 | `f_dc_0..2` 和 `f_rest_0..44`（最高 3 阶） |
 
-整型 RGB/alpha 会归一化到 `[0, 1]`；当直接 RGB 缺失时，加载器会使用对应的
-`f_dc_*` 值计算颜色。
+整型 RGB/alpha 会归一化到 `[0, 1]`。当直接 RGB 缺失时，加载器会读取标准
+3DGS 的 `f_dc_*`/`f_rest_*` 布局，并根据相机视线方向在 shader 中计算 SH 颜色。
 
 ## 测试
 
