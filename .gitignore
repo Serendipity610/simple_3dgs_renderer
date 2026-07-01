@@ -1,0 +1,6 @@
+/build/
+/out/
+/.cache/
+/test_data/
+*.user
+*.suo

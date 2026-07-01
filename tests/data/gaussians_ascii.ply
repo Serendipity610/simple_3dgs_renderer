@@ -1,0 +1,22 @@
+ply
+format ascii 1.0
+comment simple_3dgs_engine test fixture
+element vertex 3
+property float x
+property float y
+property float z
+property float scale_0
+property float scale_1
+property float scale_2
+property float rot_0
+property float rot_1
+property float rot_2
+property float rot_3
+property float opacity
+property uchar red
+property uchar green
+property uchar blue
+end_header
+-1.4 -0.4 0 -1.6 -1.6 -1.6 1 0 0 0 2.0 255 64 31
+0 0.8 0 -1.25 -1.25 -1.25 1 0 0 0 2.5 38 217 255
+1.4 -0.4 0 -1.45 -1.45 -1.45 1 0 0 0 2.0 166 77 255
