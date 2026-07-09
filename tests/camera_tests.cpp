@@ -30,10 +30,21 @@ void TestCameraControls()
     camera.Rotate(0.0F, 20000.0F);
     Require(camera.Pitch() > -1.5707964F, "lower pitch must avoid camera singularity");
 
-    const auto before = camera.Target();
+    const auto positionBeforeMove = camera.Position();
+    const auto targetBeforeMove = camera.Target();
     camera.Move(2.0F, 3.0F);
-    const auto after = camera.Target();
-    Require(before != after, "WASD movement must translate the target");
+    const auto positionAfterMove = camera.Position();
+    const auto targetAfterMove = camera.Target();
+    Require(positionBeforeMove != positionAfterMove,
+            "WASD movement must translate the camera position");
+    Require(targetBeforeMove != targetAfterMove,
+            "WASD movement must translate the camera view target");
+
+    const auto positionBeforeRotate = camera.Position();
+    camera.Rotate(20.0F, 10.0F);
+    const auto positionAfterRotate = camera.Position();
+    Require(positionBeforeRotate == positionAfterRotate,
+            "mouse rotation must pivot around the camera position");
 
     const auto position = camera.Position();
     Require(std::all_of(position.begin(), position.end(), [](float value) {

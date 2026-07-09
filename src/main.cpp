@@ -324,7 +324,7 @@ private:
         };
 
         const auto cameraPosition = camera_.Position();
-        const auto& cameraTarget = camera_.Target();
+        const auto cameraTarget = camera_.Target();
         const std::array<float, 3> forward {
             cameraTarget[0] - cameraPosition[0],
             cameraTarget[1] - cameraPosition[1],
@@ -1020,7 +1020,7 @@ private:
         const auto cameraPosition = camera_.Position();
         cameraState.cameraPositionAndPadding = {cameraPosition[0], cameraPosition[1],
                                                 cameraPosition[2], 0.0F};
-        const auto& cameraTarget = camera_.Target();
+        const auto cameraTarget = camera_.Target();
         cameraState.cameraTargetAndPadding = {cameraTarget[0], cameraTarget[1],
                                               cameraTarget[2], 0.0F};
         vkCmdPushConstants(commandBuffer, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,

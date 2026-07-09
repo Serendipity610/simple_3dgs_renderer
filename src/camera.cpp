@@ -43,6 +43,28 @@ constexpr float kVerticalFieldOfView = 0.7853981633974483F;
     return {value[0] / length, value[1] / length, value[2] / length};
 }
 
+[[nodiscard]] Vec3 Add(const Vec3& left, const Vec3& right)
+{
+    return {left[0] + right[0], left[1] + right[1], left[2] + right[2]};
+}
+
+[[nodiscard]] Vec3 Scale(const Vec3& value, float factor)
+{
+    return {value[0] * factor, value[1] * factor, value[2] * factor};
+}
+
+[[nodiscard]] Vec3 ForwardDirection(float yaw, float pitch)
+{
+    const float cosPitch = std::cos(pitch);
+    return {-std::sin(yaw) * cosPitch, std::sin(pitch),
+            -std::cos(yaw) * cosPitch};
+}
+
+[[nodiscard]] Vec3 RightDirection(float yaw)
+{
+    return {std::cos(yaw), 0.0F, -std::sin(yaw)};
+}
+
 [[nodiscard]] Mat4 LookAt(const Vec3& eye, const Vec3& center)
 {
     const Vec3 forward = Normalize(Subtract(center, eye));
@@ -97,25 +119,30 @@ void Camera::Rotate(float deltaX, float deltaY) noexcept
 
 void Camera::Zoom(float wheelSteps) noexcept
 {
+    const float previousDistance = distance_;
     distance_ = std::clamp(distance_ * std::exp(-wheelSteps * 0.12F), 0.1F, 500.0F);
+    const Vec3 forward = ForwardDirection(yaw_, pitch_);
+    position_ = Add(position_, Scale(forward, previousDistance - distance_));
 }
 
 void Camera::Move(float forward, float right) noexcept
 {
-    const Vec3 forwardDirection {-std::sin(yaw_), 0.0F, -std::cos(yaw_)};
-    const Vec3 rightDirection {std::cos(yaw_), 0.0F, -std::sin(yaw_)};
-    for (size_t index = 0; index < target_.size(); ++index) {
-        target_[index] += forwardDirection[index] * forward +
-                          rightDirection[index] * right;
+    const Vec3 forwardDirection = ForwardDirection(yaw_, pitch_);
+    const Vec3 rightDirection = RightDirection(yaw_);
+    for (size_t index = 0; index < position_.size(); ++index) {
+        position_[index] += forwardDirection[index] * forward +
+                            rightDirection[index] * right;
     }
 }
 
 std::array<float, 3> Camera::Position() const noexcept
 {
-    const float horizontalDistance = distance_ * std::cos(pitch_);
-    return {target_[0] + horizontalDistance * std::sin(yaw_),
-            target_[1] + distance_ * std::sin(pitch_),
-            target_[2] + horizontalDistance * std::cos(yaw_)};
+    return position_;
+}
+
+std::array<float, 3> Camera::Target() const noexcept
+{
+    return Add(position_, ForwardDirection(yaw_, pitch_));
 }
 
 std::array<float, 2> Camera::FocalLengthPixels(float viewportWidth,
@@ -133,7 +160,7 @@ std::array<float, 2> Camera::FocalLengthPixels(float viewportWidth,
 
 std::array<float, 16> Camera::ViewProjection(float aspectRatio) const
 {
-    return Multiply(Perspective(aspectRatio), LookAt(Position(), target_));
+    return Multiply(Perspective(aspectRatio), LookAt(Position(), Target()));
 }
 
 } // namespace simple_3dgs

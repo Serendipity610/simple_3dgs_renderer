@@ -41,7 +41,8 @@ cmake --build build --config Debug
 构建后的程序位于：
 
 ```text
-build/Debug/simple_3dgs_engine.exe
+Visual Studio / multi-config: build/Debug/simple_3dgs_engine.exe
+Ninja / Makefiles / single-config: build/simple_3dgs_engine.exe
 ```
 
 ## 运行
@@ -50,6 +51,8 @@ build/Debug/simple_3dgs_engine.exe
 
 ```powershell
 .\build\Debug\simple_3dgs_engine.exe <path-to-file.ply>
+# single-config generator:
+.\build\simple_3dgs_engine.exe <path-to-file.ply>
 ```
 
 例如加载仓库中的测试数据：

@@ -14,14 +14,14 @@ public:
     [[nodiscard]] std::array<float, 2> FocalLengthPixels(float viewportWidth,
                                                          float viewportHeight) const;
     [[nodiscard]] std::array<float, 16> ViewProjection(float aspectRatio) const;
-    [[nodiscard]] const std::array<float, 3>& Target() const noexcept { return target_; }
+    [[nodiscard]] std::array<float, 3> Target() const noexcept;
     [[nodiscard]] float Distance() const noexcept { return distance_; }
     [[nodiscard]] float Pitch() const noexcept { return pitch_; }
 
 private:
-    std::array<float, 3> target_ {0.0F, 0.0F, 0.0F};
+    std::array<float, 3> position_ {0.0F, 0.9F, 5.93F};
     float yaw_ = 0.0F;
-    float pitch_ = 0.15F;
+    float pitch_ = -0.15F;
     float distance_ = 6.0F;
 };
 
