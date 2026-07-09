@@ -59,6 +59,7 @@ endif()
 
 add_executable(simple_3dgs_engine WIN32
     src/main.cpp
+    src/vulkan_application.cpp
 )
 
 target_compile_definitions(simple_3dgs_engine PRIVATE
