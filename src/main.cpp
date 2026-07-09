@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -60,6 +62,101 @@ struct CameraPushConstants {
 };
 
 static_assert(sizeof(CameraPushConstants) == 112);
+
+[[nodiscard]] uint32_t FindMemoryType(VkPhysicalDevice physicalDevice,
+                                      uint32_t allowedTypes,
+                                      VkMemoryPropertyFlags requiredProperties)
+{
+    VkPhysicalDeviceMemoryProperties properties {};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &properties);
+    for (uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
+        const bool typeAllowed = (allowedTypes & (1U << index)) != 0;
+        const bool propertiesMatch =
+            (properties.memoryTypes[index].propertyFlags & requiredProperties) ==
+            requiredProperties;
+        if (typeAllowed && propertiesMatch) {
+            return index;
+        }
+    }
+    throw std::runtime_error("no compatible Vulkan memory type found");
+}
+
+class SortedIndexBuffer {
+public:
+    SortedIndexBuffer() = default;
+    ~SortedIndexBuffer() { Reset(); }
+
+    SortedIndexBuffer(const SortedIndexBuffer&) = delete;
+    SortedIndexBuffer& operator=(const SortedIndexBuffer&) = delete;
+
+    void Upload(VkPhysicalDevice physicalDevice, VkDevice device,
+                const std::vector<uint32_t>& indices)
+    {
+        if (indices.empty()) {
+            Reset();
+            return;
+        }
+        if (device_ != device || count_ != indices.size()) {
+            Reset();
+            device_ = device;
+            const VkDeviceSize size =
+                sizeof(uint32_t) * static_cast<VkDeviceSize>(indices.size());
+            VkBufferCreateInfo bufferInfo {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bufferInfo.size = size;
+            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            CheckVk(vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer_),
+                    "vkCreateBuffer");
+
+            VkMemoryRequirements requirements {};
+            vkGetBufferMemoryRequirements(device_, buffer_, &requirements);
+            VkMemoryAllocateInfo allocationInfo {
+                VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocationInfo.allocationSize = requirements.size;
+            allocationInfo.memoryTypeIndex = FindMemoryType(
+                physicalDevice, requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            CheckVk(vkAllocateMemory(device_, &allocationInfo, nullptr, &memory_),
+                    "vkAllocateMemory");
+            CheckVk(vkBindBufferMemory(device_, buffer_, memory_, 0),
+                    "vkBindBufferMemory");
+            sizeBytes_ = size;
+            count_ = indices.size();
+        }
+
+        void* mapped = nullptr;
+        CheckVk(vkMapMemory(device_, memory_, 0, sizeBytes_, 0, &mapped),
+                "vkMapMemory");
+        std::memcpy(mapped, indices.data(), static_cast<size_t>(sizeBytes_));
+        vkUnmapMemory(device_, memory_);
+    }
+
+    void Reset() noexcept
+    {
+        if (buffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, buffer_, nullptr);
+        }
+        if (memory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, memory_, nullptr);
+        }
+        device_ = VK_NULL_HANDLE;
+        buffer_ = VK_NULL_HANDLE;
+        memory_ = VK_NULL_HANDLE;
+        sizeBytes_ = 0;
+        count_ = 0;
+    }
+
+    [[nodiscard]] VkBuffer Buffer() const noexcept { return buffer_; }
+    [[nodiscard]] VkDeviceSize SizeBytes() const noexcept { return sizeBytes_; }
+
+private:
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory memory_ = VK_NULL_HANDLE;
+    VkDeviceSize sizeBytes_ = 0;
+    size_t count_ = 0;
+};
 
 class VulkanApplication {
 public:
@@ -113,6 +210,7 @@ private:
             const int y = GET_Y_LPARAM(lParam);
             app->camera_.Rotate(static_cast<float>(x - app->lastMouseX_),
                                 static_cast<float>(y - app->lastMouseY_));
+            app->sortedIndicesDirty_ = true;
             app->lastMouseX_ = x;
             app->lastMouseY_ = y;
             return 0;
@@ -120,6 +218,7 @@ private:
         if (app != nullptr && message == WM_MOUSEWHEEL) {
             app->camera_.Zoom(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) /
                               static_cast<float>(WHEEL_DELTA));
+            app->sortedIndicesDirty_ = true;
             return 0;
         }
         if (app != nullptr && (message == WM_KEYDOWN || message == WM_KEYUP)) {
@@ -198,11 +297,70 @@ private:
         CreateCommandPool();
         gaussianBuffer_.Upload(physicalDevice_, device_, commandPool_, graphicsQueue_,
                                gaussians_);
+        UpdateSortedGaussianIndices();
         CreateDescriptorResources();
         CreateGraphicsPipeline();
         CreateFramebuffers();
         CreateCommandBuffers();
         CreateSyncObjects();
+    }
+
+    void UpdateSortedGaussianIndices()
+    {
+        struct DepthIndex {
+            uint32_t index = 0;
+            float depth = 0.0F;
+        };
+
+        const auto cameraPosition = camera_.Position();
+        const auto& cameraTarget = camera_.Target();
+        const std::array<float, 3> forward {
+            cameraTarget[0] - cameraPosition[0],
+            cameraTarget[1] - cameraPosition[1],
+            cameraTarget[2] - cameraPosition[2],
+        };
+        const float forwardLength = std::sqrt(
+            forward[0] * forward[0] + forward[1] * forward[1] +
+            forward[2] * forward[2]);
+        if (forwardLength <= 1.0e-7F) {
+            throw std::runtime_error("cannot sort gaussians for a zero-length view");
+        }
+        const std::array<float, 3> viewDirection {
+            forward[0] / forwardLength,
+            forward[1] / forwardLength,
+            forward[2] / forwardLength,
+        };
+
+        std::vector<DepthIndex> depthIndices;
+        depthIndices.reserve(gaussians_.size());
+        for (size_t index = 0; index < gaussians_.size(); ++index) {
+            const auto& position = gaussians_[index].position;
+            const std::array<float, 3> cameraToGaussian {
+                position[0] - cameraPosition[0],
+                position[1] - cameraPosition[1],
+                position[2] - cameraPosition[2],
+            };
+            const float depth =
+                cameraToGaussian[0] * viewDirection[0] +
+                cameraToGaussian[1] * viewDirection[1] +
+                cameraToGaussian[2] * viewDirection[2];
+            depthIndices.push_back(
+                {static_cast<uint32_t>(index), depth});
+        }
+        std::sort(depthIndices.begin(), depthIndices.end(),
+                  [](const DepthIndex& left, const DepthIndex& right) {
+                      if (left.depth == right.depth) {
+                          return left.index < right.index;
+                      }
+                      return left.depth > right.depth;
+                  });
+
+        sortedGaussianIndices_.resize(depthIndices.size());
+        for (size_t index = 0; index < depthIndices.size(); ++index) {
+            sortedGaussianIndices_[index] = depthIndices[index].index;
+        }
+        sortedIndexBuffer_.Upload(physicalDevice_, device_, sortedGaussianIndices_);
+        sortedIndicesDirty_ = false;
     }
 
     void LoadInputGaussians()
@@ -604,15 +762,19 @@ private:
 
     void CreateDescriptorResources()
     {
-        VkDescriptorSetLayoutBinding bufferBinding {};
-        bufferBinding.binding = 0;
-        bufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bufferBinding.descriptorCount = 1;
-        bufferBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        std::array<VkDescriptorSetLayoutBinding, 2> bufferBindings {};
+        bufferBindings[0].binding = 0;
+        bufferBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bufferBindings[0].descriptorCount = 1;
+        bufferBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        bufferBindings[1].binding = 1;
+        bufferBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bufferBindings[1].descriptorCount = 1;
+        bufferBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         VkDescriptorSetLayoutCreateInfo layoutInfo {
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &bufferBinding;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bufferBindings.size());
+        layoutInfo.pBindings = bufferBindings.data();
         CheckVk(vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr,
                                             &descriptorSetLayout_),
                 "vkCreateDescriptorSetLayout");
@@ -633,7 +795,7 @@ private:
 
         VkDescriptorPoolSize poolSize {};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = 1;
+        poolSize.descriptorCount = 2;
         VkDescriptorPoolCreateInfo poolInfo {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 1;
         poolInfo.poolSizeCount = 1;
@@ -652,13 +814,25 @@ private:
         bufferInfo.buffer = gaussianBuffer_.Buffer();
         bufferInfo.offset = 0;
         bufferInfo.range = gaussianBuffer_.SizeBytes();
-        VkWriteDescriptorSet write {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = descriptorSet_;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &bufferInfo;
-        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+        VkDescriptorBufferInfo sortedIndexBufferInfo {};
+        sortedIndexBufferInfo.buffer = sortedIndexBuffer_.Buffer();
+        sortedIndexBufferInfo.offset = 0;
+        sortedIndexBufferInfo.range = sortedIndexBuffer_.SizeBytes();
+        std::array<VkWriteDescriptorSet, 2> writes {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = descriptorSet_;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[0].pBufferInfo = &bufferInfo;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = descriptorSet_;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[1].pBufferInfo = &sortedIndexBufferInfo;
+        vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
     }
 
     void CreateGraphicsPipeline()
@@ -881,6 +1055,9 @@ private:
         const float right = (keyDown_['D'] ? 1.0F : 0.0F) -
                             (keyDown_['A'] ? 1.0F : 0.0F);
         constexpr float kMovementSpeed = 2.5F;
+        if (forward != 0.0F || right != 0.0F) {
+            sortedIndicesDirty_ = true;
+        }
         camera_.Move(forward * kMovementSpeed * elapsedSeconds,
                      right * kMovementSpeed * elapsedSeconds);
     }
@@ -890,6 +1067,10 @@ private:
         CheckVk(vkWaitForFences(device_, 1, &inFlight_[currentFrame_], VK_TRUE,
                                 UINT64_MAX),
                 "vkWaitForFences");
+        if (sortedIndicesDirty_) {
+            CheckVk(vkQueueWaitIdle(graphicsQueue_), "vkQueueWaitIdle");
+            UpdateSortedGaussianIndices();
+        }
 
         uint32_t imageIndex = 0;
         VkResult result = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
@@ -1023,6 +1204,7 @@ private:
             if (descriptorSetLayout_ != VK_NULL_HANDLE) {
                 vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
             }
+            sortedIndexBuffer_.Reset();
             gaussianBuffer_.Reset();
             if (commandPool_ != VK_NULL_HANDLE) {
                 vkDestroyCommandPool(device_, commandPool_, nullptr);
@@ -1066,6 +1248,9 @@ private:
     VkExtent2D swapchainExtent_ {};
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     simple_3dgs::GaussianGpuBuffer gaussianBuffer_;
+    SortedIndexBuffer sortedIndexBuffer_;
+    std::vector<uint32_t> sortedGaussianIndices_;
+    bool sortedIndicesDirty_ = true;
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;

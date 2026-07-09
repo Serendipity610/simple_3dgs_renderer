@@ -12,6 +12,10 @@ layout(std430, set = 0, binding = 0) readonly buffer GaussianBuffer {
     Gaussian gaussians[];
 };
 
+layout(std430, set = 0, binding = 1) readonly buffer SortedGaussianIndexBuffer {
+    uint sortedGaussianIndices[];
+};
+
 layout(push_constant) uniform CameraState {
     mat4 viewProjection;
     vec4 viewportSizeAndFocalLength;
@@ -115,6 +119,16 @@ void ellipseAxes(vec3 covariance, out vec2 majorAxis, out vec2 minorAxis)
     const float sigmaExtent = 3.0;
     majorAxis = majorDirection * sigmaExtent * sqrt(majorEigenvalue);
     minorAxis = minorDirection * sigmaExtent * sqrt(minorEigenvalue);
+
+    const float maxAxisPixels = 512.0;
+    float majorLength = length(majorAxis);
+    if (majorLength > maxAxisPixels) {
+        majorAxis *= maxAxisPixels / majorLength;
+    }
+    float minorLength = length(minorAxis);
+    if (minorLength > maxAxisPixels) {
+        minorAxis *= maxAxisPixels / minorLength;
+    }
 }
 
 float readShCoefficient(uint gaussianIndex, int valueIndex)
@@ -185,13 +199,14 @@ vec3 evaluateShColor(uint gaussianIndex, int degree, vec3 direction)
 
 void main()
 {
-    Gaussian gaussian = gaussians[gl_InstanceIndex];
+    uint gaussianIndex = sortedGaussianIndices[gl_InstanceIndex];
+    Gaussian gaussian = gaussians[gaussianIndex];
     vec2 corner = corners[gl_VertexIndex];
     vec4 center = camera.viewProjection * vec4(gaussian.positionOpacity.xyz, 1.0);
     mat3 cameraBasis = worldToCameraBasis();
     vec3 centerInCamera = cameraBasis *
                           (gaussian.positionOpacity.xyz - camera.cameraPosition.xyz);
-    if (centerInCamera.z <= 0.05 || center.w <= 0.0) {
+    if (centerInCamera.z <= 0.001 || center.w <= 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         localPosition = corner;
         splatColor = vec4(0.0);
@@ -217,7 +232,7 @@ void main()
                                 camera.cameraPosition.xyz;
         vec3 viewDirection = cameraToGaussian /
                              max(length(cameraToGaussian), 1.0e-6);
-        color = evaluateShColor(gl_InstanceIndex, shDegree, viewDirection);
+        color = evaluateShColor(gaussianIndex, shDegree, viewDirection);
     }
     splatColor = vec4(color, gaussian.positionOpacity.w);
 }
