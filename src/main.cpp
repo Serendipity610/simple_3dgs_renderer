@@ -18,8 +18,10 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,6 +31,7 @@ namespace {
 constexpr uint32_t kInitialWidth = 1280;
 constexpr uint32_t kInitialHeight = 720;
 constexpr size_t kFramesInFlight = 2;
+constexpr float kInitialCameraDistance = 6.0F;
 
 void CheckVk(VkResult result, const char* operation)
 {
@@ -219,6 +222,7 @@ private:
             app->camera_.Zoom(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) /
                               static_cast<float>(WHEEL_DELTA));
             app->MarkSortedGaussianIndicesDirty();
+            app->UpdateWindowTitle();
             return 0;
         }
         if (app != nullptr && (message == WM_KEYDOWN || message == WM_KEYUP)) {
@@ -269,8 +273,26 @@ private:
             throw std::runtime_error("failed to create Win32 window");
         }
 
+        UpdateWindowTitle();
         ShowWindow(window_, showCommand);
         UpdateWindow(window_);
+    }
+
+    void UpdateWindowTitle()
+    {
+        if (window_ == nullptr) {
+            return;
+        }
+        const float zoom = kInitialCameraDistance / camera_.Distance();
+        std::wostringstream title;
+        title << L"Simple 3DGS Engine | WASD Move | LMB Look | Wheel Zoom | Zoom "
+              << std::fixed << std::setprecision(2) << zoom << L"x | Distance "
+              << camera_.Distance();
+        const std::wstring text = title.str();
+        if (text != windowTitle_) {
+            SetWindowTextW(window_, text.c_str());
+            windowTitle_ = text;
+        }
     }
 
     void DestroyWindowHandle(HINSTANCE instance)
@@ -1254,6 +1276,7 @@ private:
 
     static constexpr const wchar_t* kWindowClassName = L"Simple3dgsEngineWindow";
     HWND window_ = nullptr;
+    std::wstring windowTitle_;
     bool windowClassRegistered_ = false;
     bool framebufferResized_ = false;
     bool smokeTest_ = false;

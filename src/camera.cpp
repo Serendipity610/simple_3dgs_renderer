@@ -119,8 +119,11 @@ void Camera::Rotate(float deltaX, float deltaY) noexcept
 
 void Camera::Zoom(float wheelSteps) noexcept
 {
+    constexpr float kZoomSensitivity = 0.04F;
     const float previousDistance = distance_;
-    distance_ = std::clamp(distance_ * std::exp(-wheelSteps * 0.12F), 0.1F, 500.0F);
+    distance_ =
+        std::clamp(distance_ * std::exp(-wheelSteps * kZoomSensitivity), 0.1F,
+                   500.0F);
     const Vec3 forward = ForwardDirection(yaw_, pitch_);
     position_ = Add(position_, Scale(forward, previousDistance - distance_));
 }

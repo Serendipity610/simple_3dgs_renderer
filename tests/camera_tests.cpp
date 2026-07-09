@@ -20,6 +20,8 @@ void TestCameraControls()
     const float initialDistance = camera.Distance();
     camera.Zoom(2.0F);
     Require(camera.Distance() < initialDistance, "positive wheel must zoom in");
+    Require(camera.Distance() > initialDistance * 0.9F,
+            "mouse wheel zoom must use a gentle per-step scale");
     camera.Zoom(-1000.0F);
     Require(camera.Distance() == 500.0F, "zoom out must be bounded");
     camera.Zoom(1000.0F);
