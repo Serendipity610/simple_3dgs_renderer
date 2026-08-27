@@ -6,10 +6,10 @@
 #include <exception>
 #include <iostream>
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
+int wmain()
 {
     try {
-        simple_3dgs::RunApplication(instance, showCommand);
+        simple_3dgs::RunApplication(GetModuleHandleW(nullptr), SW_SHOWDEFAULT);
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         MessageBoxA(nullptr, error.what(), "Simple 3DGS Engine", MB_OK | MB_ICONERROR);

@@ -61,7 +61,7 @@ else()
     target_compile_options(simple_3dgs_vulkan PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(simple_3dgs_engine WIN32
+add_executable(simple_3dgs_engine
     src/main.cpp
     src/vulkan_application.cpp
 )
