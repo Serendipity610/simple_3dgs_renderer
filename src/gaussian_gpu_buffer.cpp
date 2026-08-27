@@ -150,6 +150,16 @@ GpuGaussian ToGpuGaussian(const Gaussian& gaussian)
     return result;
 }
 
+GpuOpacitySh ToGpuOpacitySh(const Gaussian& gaussian)
+{
+    GpuOpacitySh result;
+    for (size_t index = 0; index < gaussian.opacityShCoefficients.size(); ++index) {
+        result.coefficients[index / 4][index % 4] =
+            gaussian.opacityShCoefficients[index];
+    }
+    return result;
+}
+
 GaussianGpuBuffer::~GaussianGpuBuffer()
 {
     Reset();
@@ -214,6 +224,84 @@ void GaussianGpuBuffer::Upload(VkPhysicalDevice physicalDevice, VkDevice device,
 }
 
 void GaussianGpuBuffer::Reset() noexcept
+{
+    if (buffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, buffer_, nullptr);
+    }
+    if (memory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, memory_, nullptr);
+    }
+    device_ = VK_NULL_HANDLE;
+    buffer_ = VK_NULL_HANDLE;
+    memory_ = VK_NULL_HANDLE;
+    sizeBytes_ = 0;
+    count_ = 0;
+}
+
+OpacityShGpuBuffer::~OpacityShGpuBuffer()
+{
+    Reset();
+}
+
+OpacityShGpuBuffer::OpacityShGpuBuffer(OpacityShGpuBuffer&& other) noexcept
+    : device_(std::exchange(other.device_, VK_NULL_HANDLE)),
+      buffer_(std::exchange(other.buffer_, VK_NULL_HANDLE)),
+      memory_(std::exchange(other.memory_, VK_NULL_HANDLE)),
+      sizeBytes_(std::exchange(other.sizeBytes_, 0)),
+      count_(std::exchange(other.count_, 0))
+{
+}
+
+OpacityShGpuBuffer& OpacityShGpuBuffer::operator=(OpacityShGpuBuffer&& other) noexcept
+{
+    if (this != &other) {
+        Reset();
+        device_ = std::exchange(other.device_, VK_NULL_HANDLE);
+        buffer_ = std::exchange(other.buffer_, VK_NULL_HANDLE);
+        memory_ = std::exchange(other.memory_, VK_NULL_HANDLE);
+        sizeBytes_ = std::exchange(other.sizeBytes_, 0);
+        count_ = std::exchange(other.count_, 0);
+    }
+    return *this;
+}
+
+void OpacityShGpuBuffer::Upload(VkPhysicalDevice physicalDevice, VkDevice device,
+                                VkCommandPool commandPool, VkQueue transferQueue,
+                                const std::vector<Gaussian>& gaussians)
+{
+    if (gaussians.empty()) {
+        Reset();
+        return;
+    }
+
+    const VkDeviceSize size = sizeof(GpuOpacitySh) * gaussians.size();
+    TemporaryBuffer staging = CreateBuffer(
+        physicalDevice, device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    void* mapped = nullptr;
+    CheckVk(vkMapMemory(device, staging.memory, 0, size, 0, &mapped), "vkMapMemory");
+    auto* destination = static_cast<GpuOpacitySh*>(mapped);
+    for (size_t index = 0; index < gaussians.size(); ++index) {
+        destination[index] = ToGpuOpacitySh(gaussians[index]);
+    }
+    vkUnmapMemory(device, staging.memory);
+
+    TemporaryBuffer uploaded = CreateBuffer(
+        physicalDevice, device, size,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    CopyBuffer(device, commandPool, transferQueue, staging.buffer, uploaded.buffer, size);
+
+    Reset();
+    device_ = device;
+    buffer_ = std::exchange(uploaded.buffer, VK_NULL_HANDLE);
+    memory_ = std::exchange(uploaded.memory, VK_NULL_HANDLE);
+    sizeBytes_ = size;
+    count_ = gaussians.size();
+}
+
+void OpacityShGpuBuffer::Reset() noexcept
 {
     if (buffer_ != VK_NULL_HANDLE) {
         vkDestroyBuffer(device_, buffer_, nullptr);

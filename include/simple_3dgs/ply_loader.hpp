@@ -18,16 +18,27 @@ struct PlyLoadStatistics {
     std::string path;
 };
 
+struct PlyModelMetadata {
+    bool supportsSortFree = false;
+    float weightBackground = 0.0F;
+    float sigma = 0.0F;
+    std::string sortFreeDiagnostic;
+};
+
 class PlyLoader {
 public:
     [[nodiscard]] static std::vector<Gaussian> Load(const std::filesystem::path& path);
     [[nodiscard]] static std::vector<Gaussian> Load(
         const std::filesystem::path& path, PlyLoadStatistics* statistics);
+    [[nodiscard]] static std::vector<Gaussian> Load(
+        const std::filesystem::path& path, PlyLoadStatistics* statistics,
+        PlyModelMetadata* metadata);
 
     using BatchCallback = std::function<void(const Gaussian*, size_t)>;
     static PlyLoadStatistics LoadBatches(const std::filesystem::path& path,
                                          size_t batchSize,
-                                         const BatchCallback& callback);
+                                         const BatchCallback& callback,
+                                         PlyModelMetadata* metadata = nullptr);
 };
 
 } // namespace simple_3dgs

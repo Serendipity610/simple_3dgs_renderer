@@ -16,6 +16,10 @@ set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(SHADER_SOURCES
     shaders/splat.vert
     shaders/splat.frag
+    shaders/sort_free_splat.vert
+    shaders/sort_free_splat.frag
+    shaders/normalize.vert
+    shaders/normalize.frag
 )
 set(SHADER_BINARIES)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
@@ -144,4 +148,22 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gaussians_ascii.ply"
     )
     set_tests_properties(renderer_ply_smoke PROPERTIES TIMEOUT 15)
+
+    add_test(NAME renderer_sort_free_default_smoke
+        COMMAND simple_3dgs_engine --smoke-test
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gaussians_sort_free_ascii.ply"
+    )
+    set_tests_properties(renderer_sort_free_default_smoke PROPERTIES TIMEOUT 15)
+
+    add_test(NAME renderer_sort_free_smoke
+        COMMAND simple_3dgs_engine --smoke-test --sort-free
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gaussians_sort_free_ascii.ply"
+    )
+    set_tests_properties(renderer_sort_free_smoke PROPERTIES TIMEOUT 15)
+
+    add_test(NAME renderer_sort_free_fallback_smoke
+        COMMAND simple_3dgs_engine --smoke-test --sort-free
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/gaussians_ascii.ply"
+    )
+    set_tests_properties(renderer_sort_free_fallback_smoke PROPERTIES TIMEOUT 15)
 endif()

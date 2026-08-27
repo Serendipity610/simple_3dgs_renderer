@@ -116,10 +116,11 @@ struct VulkanTestContext {
     }
 };
 
-std::vector<simple_3dgs::GpuGaussian> ReadBack(
+template<typename T>
+std::vector<T> ReadBack(
     const VulkanTestContext& context, VkBuffer source, size_t count)
 {
-    const VkDeviceSize size = count * sizeof(simple_3dgs::GpuGaussian);
+    const VkDeviceSize size = count * sizeof(T);
     VkBuffer destination = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -171,7 +172,7 @@ std::vector<simple_3dgs::GpuGaussian> ReadBack(
     void* mapped = nullptr;
     CheckVk(vkMapMemory(context.device, memory, 0, size, 0, &mapped),
             "vkMapMemory(readback)");
-    std::vector<simple_3dgs::GpuGaussian> result(count);
+    std::vector<T> result(count);
     std::memcpy(result.data(), mapped, static_cast<size_t>(size));
     vkUnmapMemory(context.device, memory);
     vkDestroyFence(context.device, fence, nullptr);
@@ -204,7 +205,8 @@ void TestUploadAndLifecycle()
     Require(buffer.Count() == 2, "upload count");
     Require(buffer.SizeBytes() == 2 * sizeof(simple_3dgs::GpuGaussian), "upload size");
 
-    const auto uploaded = ReadBack(context, buffer.Buffer(), buffer.Count());
+    const auto uploaded = ReadBack<simple_3dgs::GpuGaussian>(
+        context, buffer.Buffer(), buffer.Count());
     Require(std::abs(uploaded[0].positionOpacity[2] - 3.0F) < 1.0e-6F,
             "uploaded position");
     Require(std::abs(uploaded[0].positionOpacity[3] - 0.25F) < 1.0e-6F,
@@ -227,12 +229,43 @@ void TestUploadAndLifecycle()
             "reset releases ownership");
 }
 
+void TestOpacityShUploadAndLifecycle()
+{
+    VulkanTestContext context;
+    simple_3dgs::Gaussian first;
+    simple_3dgs::Gaussian second;
+    for (size_t index = 0; index < first.opacityShCoefficients.size(); ++index) {
+        first.opacityShCoefficients[index] = static_cast<float>(index) * 0.25F;
+        second.opacityShCoefficients[index] = -static_cast<float>(index);
+    }
+    simple_3dgs::OpacityShGpuBuffer buffer;
+    buffer.Upload(context.physicalDevice, context.device, context.commandPool,
+                  context.queue, {first, second});
+    Require(buffer.Count() == 2, "opacity SH upload count");
+    Require(buffer.SizeBytes() == 2 * sizeof(simple_3dgs::GpuOpacitySh),
+            "opacity SH upload size");
+    const auto uploaded = ReadBack<simple_3dgs::GpuOpacitySh>(
+        context, buffer.Buffer(), buffer.Count());
+    Require(std::abs(uploaded[0].coefficients[3][3] - 3.75F) < 1.0e-6F,
+            "opacity SH last coefficient");
+    Require(std::abs(uploaded[1].coefficients[1][2] + 6.0F) < 1.0e-6F,
+            "opacity SH second record");
+
+    simple_3dgs::OpacityShGpuBuffer moved = std::move(buffer);
+    Require(buffer.Buffer() == VK_NULL_HANDLE && moved.Count() == 2,
+            "opacity SH move transfers ownership");
+    moved.Reset();
+    Require(moved.Buffer() == VK_NULL_HANDLE && moved.SizeBytes() == 0,
+            "opacity SH reset releases ownership");
+}
+
 } // namespace
 
 int main()
 {
     try {
         TestUploadAndLifecycle();
+        TestOpacityShUploadAndLifecycle();
         std::cout << "Gaussian GPU buffer tests passed\n";
         return 0;
     } catch (const std::exception& error) {
