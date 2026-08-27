@@ -166,6 +166,130 @@ void TestBatchBoundaries()
     RequireNear(collected.back().position[0], 1.4F, "batch last record");
 }
 
+void WriteSortFreeHeader(std::ostream& output, const std::string& format,
+                         size_t vertexCount, bool includeLastCoefficient = true)
+{
+    output << "ply\nformat " << format << " 1.0\nelement vertex " << vertexCount
+           << "\nproperty float x\nproperty float y\nproperty float z\n"
+              "property float f_do_0\n";
+    const size_t count = includeLastCoefficient ? 15 : 14;
+    for (size_t index = 0; index < count; ++index) {
+        output << "property float f_ro_" << index << '\n';
+    }
+    output << "property float info\nend_header\n";
+}
+
+void TestSortFreeAsciiMetadata()
+{
+    const std::filesystem::path file =
+        std::filesystem::path(SIMPLE_3DGS_TEST_DATA_DIR) /
+        "gaussians_sort_free_ascii.ply";
+    simple_3dgs::PlyModelMetadata metadata;
+    const auto gaussians = simple_3dgs::PlyLoader::Load(file, nullptr, &metadata);
+    Require(metadata.supportsSortFree, "complete sort-free ASCII header");
+    RequireNear(metadata.weightBackground, 0.02F, "sort-free background weight");
+    RequireNear(metadata.sigma, 10.0F, "sort-free sigma");
+    RequireNear(gaussians[0].opacityShCoefficients[0], 0.35449077F,
+                "sort-free opacity SH DC");
+    RequireNear(gaussians[0].opacityShCoefficients[15], 0.0F,
+                "sort-free opacity SH degree 3");
+}
+
+void TestSortFreeBinaryMetadata()
+{
+    TemporaryFile file("simple_3dgs_sort_free_binary_test.ply");
+    {
+        std::ofstream output(file.Path(), std::ios::binary);
+        WriteSortFreeHeader(output, "binary_little_endian", 2);
+        for (size_t record = 0; record < 2; ++record) {
+            WriteBinary(output, static_cast<float>(record), false);
+            WriteBinary(output, 0.0F, false);
+            WriteBinary(output, 1.0F, false);
+            for (size_t coefficient = 0; coefficient < 16; ++coefficient) {
+                WriteBinary(output,
+                            static_cast<float>(record * 100 + coefficient), false);
+            }
+            WriteBinary(output, record == 0 ? 0.03F : 12.0F, false);
+        }
+    }
+    simple_3dgs::PlyModelMetadata metadata;
+    const auto gaussians = simple_3dgs::PlyLoader::Load(file.Path(), nullptr,
+                                                        &metadata);
+    Require(metadata.supportsSortFree, "complete sort-free binary header");
+    RequireNear(metadata.weightBackground, 0.03F, "binary background weight");
+    RequireNear(metadata.sigma, 12.0F, "binary sigma");
+    RequireNear(gaussians[1].opacityShCoefficients[15], 115.0F,
+                "binary opacity SH mapping");
+}
+
+void TestSortFreeUnsupportedInputs()
+{
+    TemporaryFile missing("simple_3dgs_sort_free_missing_test.ply");
+    {
+        std::ofstream output(missing.Path());
+        WriteSortFreeHeader(output, "ascii", 2, false);
+        for (size_t record = 0; record < 2; ++record) {
+            output << "0 0 1";
+            for (size_t value = 0; value < 15; ++value) output << " 0";
+            output << (record == 0 ? " 0.02\n" : " 10\n");
+        }
+    }
+    simple_3dgs::PlyModelMetadata metadata;
+    static_cast<void>(simple_3dgs::PlyLoader::Load(missing.Path(), nullptr,
+                                                   &metadata));
+    Require(!metadata.supportsSortFree, "missing opacity SH must be unsupported");
+    Require(metadata.sortFreeDiagnostic.find("f_ro_14") != std::string::npos,
+            "missing property diagnostic");
+
+    TemporaryFile invalid("simple_3dgs_sort_free_invalid_sigma_test.ply");
+    {
+        std::ofstream output(invalid.Path());
+        WriteSortFreeHeader(output, "ascii", 2);
+        for (size_t record = 0; record < 2; ++record) {
+            output << "0 0 1";
+            for (size_t value = 0; value < 16; ++value) output << " 0";
+            output << (record == 0 ? " 0.02\n" : " 0\n");
+        }
+    }
+    static_cast<void>(simple_3dgs::PlyLoader::Load(invalid.Path(), nullptr,
+                                                   &metadata));
+    Require(!metadata.supportsSortFree, "non-positive sigma must be unsupported");
+    Require(metadata.sortFreeDiagnostic.find("sigma") != std::string::npos,
+            "invalid sigma diagnostic");
+
+    TemporaryFile tooSmall("simple_3dgs_sort_free_too_small_test.ply");
+    {
+        std::ofstream output(tooSmall.Path());
+        WriteSortFreeHeader(output, "ascii", 1);
+        output << "0 0 1";
+        for (size_t value = 0; value < 16; ++value) output << " 0";
+        output << " 0.02\n";
+    }
+    static_cast<void>(simple_3dgs::PlyLoader::Load(tooSmall.Path(), nullptr,
+                                                   &metadata));
+    Require(!metadata.supportsSortFree, "single vertex must be unsupported");
+    Require(metadata.sortFreeDiagnostic.find("two vertices") != std::string::npos,
+            "minimum vertex diagnostic");
+
+    TemporaryFile invalidBackground(
+        "simple_3dgs_sort_free_invalid_background_test.ply");
+    {
+        std::ofstream output(invalidBackground.Path());
+        WriteSortFreeHeader(output, "ascii", 2);
+        for (size_t record = 0; record < 2; ++record) {
+            output << "0 0 1";
+            for (size_t value = 0; value < 16; ++value) output << " 0";
+            output << (record == 0 ? " -0.1\n" : " 10\n");
+        }
+    }
+    static_cast<void>(simple_3dgs::PlyLoader::Load(
+        invalidBackground.Path(), nullptr, &metadata));
+    Require(!metadata.supportsSortFree,
+            "negative background weight must be unsupported");
+    Require(metadata.sortFreeDiagnostic.find("background") != std::string::npos,
+            "invalid background diagnostic");
+}
+
 } // namespace
 
 int main()
@@ -176,6 +300,9 @@ int main()
         TestBinarySh(true);
         TestRejectsMissingPosition();
         TestBatchBoundaries();
+        TestSortFreeAsciiMetadata();
+        TestSortFreeBinaryMetadata();
+        TestSortFreeUnsupportedInputs();
         std::cout << "PLY loader tests passed\n";
         return 0;
     } catch (const std::exception& error) {

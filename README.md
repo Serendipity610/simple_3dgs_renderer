@@ -10,6 +10,7 @@ Win32 窗口后端，可加载 Gaussian PLY 数据、上传到 GPU，并以实�
 - 使用 staging buffer 将 Gaussian 数据上传到 GPU storage buffer
 - 将三维 covariance 透视投影为屏幕空间各向异性椭圆 splat
 - 使用 Vulkan swapchain 和 alpha blending 渲染屏幕空间 splat
+- 自动识别 `sort-free-gs` PLY 能力，并可选择 LC-WSR 无排序渲染
 - 支持窗口缩放及 swapchain 重建
 - 支持鼠标和键盘相机控制
 - 包含 PLY、相机、GPU buffer 和渲染冒烟测试
@@ -73,6 +74,16 @@ Ninja / Makefiles / single-config: build/simple_3dgs_engine.exe
 .\build\Debug\simple_3dgs_engine.exe .\tests\data\gaussians_ascii.ply --smoke-test
 ```
 
+对于包含 `f_do_0`、`f_ro_0..14` 和 `info` 的兼容模型，可显式启用
+sort-free 路径：
+
+```powershell
+.\build\Debug\simple_3dgs_engine.exe --sort-free <path-to-sort-free-file.ply>
+```
+
+模型能力会从 PLY header 自动识别，但不会自动切换算法。未传入
+`--sort-free` 时仍使用 sorted-alpha；模型或 GPU 不兼容时会输出警告并回退。
+
 ## 相机控制
 
 | 输入 | 操作 |
@@ -93,6 +104,8 @@ Ninja / Makefiles / single-config: build/simple_3dgs_engine.exe
 | Opacity | `opacity` 或 `alpha` |
 | RGB | `red/green/blue`、`r/g/b` 或 `color_0..2` |
 | 球谐颜色 | `f_dc_0..2` 和 `f_rest_0..44`（最高 3 阶） |
+| Sort-free opacity SH | `f_do_0` 和 `f_ro_0..14` |
+| Sort-free 全局参数 | `info`（前两个 vertex 保存背景权重和 sigma） |
 
 整型 RGB/alpha 会归一化到 `[0, 1]`。当直接 RGB 缺失时，加载器会读取标准
 3DGS 的 `f_dc_*`/`f_rest_*` 布局，并根据相机视线方向在 shader 中计算 SH 颜色。
@@ -114,7 +127,7 @@ ctest --test-dir build -C Debug --output-on-failure
 ## 当前限制
 
 - 仅提供 Win32 窗口后端
-- 尚未根据相机视角对 Gaussian 进行深度排序
+- sorted-alpha 路径使用 CPU 动态深度排序；sort-free 路径使用 LC-WSR
 - 不支持训练、Gaussian 编辑或复杂场景管理
 - 当前实现面向最小可运行验证，尚未针对大规模数据或移动平台优化
 

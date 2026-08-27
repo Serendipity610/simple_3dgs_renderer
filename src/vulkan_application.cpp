@@ -65,9 +65,16 @@ struct CameraPushConstants {
     std::array<float, 4> viewportSizeAndFocalLength {};
     std::array<float, 4> cameraPositionAndPadding {};
     std::array<float, 4> cameraTargetAndPadding {};
+    std::array<float, 4> sortFreeParameters {};
 };
 
-static_assert(sizeof(CameraPushConstants) == 112);
+static_assert(sizeof(CameraPushConstants) == 128);
+
+struct ImageResource {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+};
 
 [[nodiscard]] uint32_t FindMemoryType(VkPhysicalDevice physicalDevice,
                                       uint32_t allowedTypes,
@@ -294,7 +301,8 @@ private:
         std::wostringstream title;
         title << L"Simple 3DGS Engine | WASD Move | LMB Look | Wheel Zoom | Zoom "
               << std::fixed << std::setprecision(2) << zoom << L"x | Distance "
-              << camera_.Distance();
+              << camera_.Distance() << L" | "
+              << (sortFreeEnabled_ ? L"sort-free-lc-wsr" : L"sorted-alpha");
         const std::wstring text = title.str();
         if (text != windowTitle_) {
             SetWindowTextW(window_, text.c_str());
@@ -319,9 +327,20 @@ private:
         CreateInstance();
         CreateSurface(applicationInstance);
         PickPhysicalDevice();
+        if (sortFreeEnabled_ && !SupportsSortFreeAccumulation()) {
+            std::cerr << "warning: --sort-free requested but the GPU does not support "
+                         "R16G16B16A16_SFLOAT color attachment blending; falling back "
+                         "to sorted-alpha\n";
+            sortFreeEnabled_ = false;
+        }
+        std::cout << "render_path="
+                  << (sortFreeEnabled_ ? "sort-free-lc-wsr" : "sorted-alpha")
+                  << '\n';
+        UpdateWindowTitle();
         CreateLogicalDevice();
         CreateSwapchain();
         CreateImageViews();
+        if (sortFreeEnabled_) CreateAccumulationResources();
         CreateRenderPass();
         CreateCommandPool();
         const auto uploadStart = std::chrono::steady_clock::now();
@@ -329,13 +348,21 @@ private:
                                gaussians_);
         uploadSeconds_ = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - uploadStart).count();
-        RebuildSortedGaussianIndices();
-        for (size_t index = 0; index < kFramesInFlight; ++index) {
-            sortedIndexBuffers_[index].Upload(physicalDevice_, device_,
-                                              sortedGaussianIndices_);
-            sortedIndexBufferDirty_[index] = false;
+        if (sortFreeEnabled_) {
+            opacityShBuffer_.Upload(physicalDevice_, device_, commandPool_,
+                                    graphicsQueue_, gaussians_);
+            visibleGaussianCount_ = gaussians_.size();
+            lastSortSeconds_ = 0.0;
+        } else {
+            RebuildSortedGaussianIndices();
+            for (size_t index = 0; index < kFramesInFlight; ++index) {
+                sortedIndexBuffers_[index].Upload(physicalDevice_, device_,
+                                                  sortedGaussianIndices_);
+                sortedIndexBufferDirty_[index] = false;
+            }
         }
         CreateDescriptorResources();
+        if (sortFreeEnabled_) CreateNormalizationDescriptorResources();
         CreateGraphicsPipeline();
         CreateFramebuffers();
         CreateCommandBuffers();
@@ -344,6 +371,7 @@ private:
 
     void MarkSortedGaussianIndicesDirty()
     {
+        if (sortFreeEnabled_) return;
         sortedGaussianIndicesValid_ = false;
         sortedIndexBufferDirty_.fill(true);
     }
@@ -434,6 +462,8 @@ private:
         for (int index = 1; index < argumentCount; ++index) {
             if (std::wstring(arguments[index]) == L"--smoke-test") {
                 smokeTest_ = true;
+            } else if (std::wstring(arguments[index]) == L"--sort-free") {
+                sortFreeRequested_ = true;
             } else if (!plyPath.has_value()) {
                 plyPath = std::filesystem::path(arguments[index]);
             } else {
@@ -444,11 +474,25 @@ private:
         LocalFree(arguments);
 
         if (plyPath.has_value()) {
-            gaussians_ = simple_3dgs::PlyLoader::Load(*plyPath, &loadStatistics_);
+            gaussians_ = simple_3dgs::PlyLoader::Load(
+                *plyPath, &loadStatistics_, &modelMetadata_);
             if (gaussians_.empty()) {
                 throw std::runtime_error("PLY file contains no vertices");
             }
+            if (sortFreeRequested_) {
+                if (modelMetadata_.supportsSortFree) {
+                    sortFreeEnabled_ = true;
+                } else {
+                    std::cerr << "warning: --sort-free requested but "
+                              << modelMetadata_.sortFreeDiagnostic
+                              << "; falling back to sorted-alpha\n";
+                }
+            }
             return;
+        }
+        if (sortFreeRequested_) {
+            std::cerr << "warning: --sort-free requested for built-in data; falling "
+                         "back to sorted-alpha\n";
         }
         simple_3dgs::Gaussian left;
         left.position = {-1.4F, -0.4F, 0.0F};
@@ -466,6 +510,17 @@ private:
         right.opacity = 2.0F;
         right.color = {0.65F, 0.3F, 1.0F};
         gaussians_ = {left, center, right};
+    }
+
+    [[nodiscard]] bool SupportsSortFreeAccumulation() const
+    {
+        VkFormatProperties properties {};
+        vkGetPhysicalDeviceFormatProperties(
+            physicalDevice_, VK_FORMAT_R16G16B16A16_SFLOAT, &properties);
+        constexpr VkFormatFeatureFlags required =
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+        return (properties.optimalTilingFeatures & required) == required;
     }
 
     void CreateInstance()
@@ -752,8 +807,57 @@ private:
         }
     }
 
+    void CreateAccumulationResources()
+    {
+        accumulationImages_.resize(swapchainImages_.size());
+        for (ImageResource& resource : accumulationImages_) {
+            VkImageCreateInfo imageInfo {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+            imageInfo.extent = {swapchainExtent_.width, swapchainExtent_.height, 1};
+            imageInfo.mipLevels = 1;
+            imageInfo.arrayLayers = 1;
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            CheckVk(vkCreateImage(device_, &imageInfo, nullptr, &resource.image),
+                    "vkCreateImage(sort-free accumulation)");
+
+            VkMemoryRequirements requirements {};
+            vkGetImageMemoryRequirements(device_, resource.image, &requirements);
+            VkMemoryAllocateInfo allocationInfo {
+                VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocationInfo.allocationSize = requirements.size;
+            allocationInfo.memoryTypeIndex = FindMemoryType(
+                physicalDevice_, requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            CheckVk(vkAllocateMemory(device_, &allocationInfo, nullptr,
+                                     &resource.memory),
+                    "vkAllocateMemory(sort-free accumulation)");
+            CheckVk(vkBindImageMemory(device_, resource.image, resource.memory, 0),
+                    "vkBindImageMemory(sort-free accumulation)");
+
+            VkImageViewCreateInfo viewInfo {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            viewInfo.image = resource.image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = imageInfo.format;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.layerCount = 1;
+            CheckVk(vkCreateImageView(device_, &viewInfo, nullptr, &resource.view),
+                    "vkCreateImageView(sort-free accumulation)");
+        }
+    }
+
     void CreateRenderPass()
     {
+        if (sortFreeEnabled_) {
+            CreateSortFreeRenderPass();
+            return;
+        }
         VkAttachmentDescription colorAttachment {};
         colorAttachment.format = swapchainFormat_;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -788,6 +892,70 @@ private:
         createInfo.pDependencies = &dependency;
         CheckVk(vkCreateRenderPass(device_, &createInfo, nullptr, &renderPass_),
                 "vkCreateRenderPass");
+    }
+
+    void CreateSortFreeRenderPass()
+    {
+        std::array<VkAttachmentDescription, 2> attachments {};
+        attachments[0].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        attachments[1].format = swapchainFormat_;
+        attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        const VkAttachmentReference accumulationColor {
+            0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        const VkAttachmentReference accumulationInput {
+            0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkAttachmentReference swapchainColor {
+            1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        std::array<VkSubpassDescription, 2> subpasses {};
+        subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpasses[0].colorAttachmentCount = 1;
+        subpasses[0].pColorAttachments = &accumulationColor;
+        subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpasses[1].inputAttachmentCount = 1;
+        subpasses[1].pInputAttachments = &accumulationInput;
+        subpasses[1].colorAttachmentCount = 1;
+        subpasses[1].pColorAttachments = &swapchainColor;
+
+        std::array<VkSubpassDependency, 2> dependencies {};
+        dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[0].dstSubpass = 0;
+        dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+        dependencies[1].srcSubpass = 0;
+        dependencies[1].dstSubpass = 1;
+        dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependencies[1].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+        // Tile-local dependency: additive color writes must be visible to the
+        // normalization fragment shader before it reads the input attachment.
+        dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+        VkRenderPassCreateInfo createInfo {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        createInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        createInfo.pAttachments = attachments.data();
+        createInfo.subpassCount = static_cast<uint32_t>(subpasses.size());
+        createInfo.pSubpasses = subpasses.data();
+        createInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+        createInfo.pDependencies = dependencies.data();
+        CheckVk(vkCreateRenderPass(device_, &createInfo, nullptr, &renderPass_),
+                "vkCreateRenderPass(sort-free)");
     }
 
     [[nodiscard]] std::vector<uint32_t> ReadShaderCode(const wchar_t* fileName) const
@@ -882,15 +1050,19 @@ private:
         CheckVk(vkAllocateDescriptorSets(device_, &allocationInfo, descriptorSets_.data()),
                 "vkAllocateDescriptorSets");
         std::array<VkDescriptorBufferInfo, kFramesInFlight> gaussianBufferInfos {};
-        std::array<VkDescriptorBufferInfo, kFramesInFlight> sortedIndexBufferInfos {};
+        std::array<VkDescriptorBufferInfo, kFramesInFlight> secondaryBufferInfos {};
         std::array<VkWriteDescriptorSet, 2 * kFramesInFlight> writes {};
         for (size_t index = 0; index < kFramesInFlight; ++index) {
             gaussianBufferInfos[index].buffer = gaussianBuffer_.Buffer();
             gaussianBufferInfos[index].offset = 0;
             gaussianBufferInfos[index].range = gaussianBuffer_.SizeBytes();
-            sortedIndexBufferInfos[index].buffer = sortedIndexBuffers_[index].Buffer();
-            sortedIndexBufferInfos[index].offset = 0;
-            sortedIndexBufferInfos[index].range = sortedIndexBuffers_[index].SizeBytes();
+            secondaryBufferInfos[index].buffer = sortFreeEnabled_
+                ? opacityShBuffer_.Buffer()
+                : sortedIndexBuffers_[index].Buffer();
+            secondaryBufferInfos[index].offset = 0;
+            secondaryBufferInfos[index].range = sortFreeEnabled_
+                ? opacityShBuffer_.SizeBytes()
+                : sortedIndexBuffers_[index].SizeBytes();
 
             VkWriteDescriptorSet& gaussianWrite = writes[index * 2];
             gaussianWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -906,7 +1078,70 @@ private:
             sortedIndexWrite.dstBinding = 1;
             sortedIndexWrite.descriptorCount = 1;
             sortedIndexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            sortedIndexWrite.pBufferInfo = &sortedIndexBufferInfos[index];
+            sortedIndexWrite.pBufferInfo = &secondaryBufferInfos[index];
+        }
+        vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    void CreateNormalizationDescriptorResources()
+    {
+        if (normalizationDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutBinding inputBinding {};
+            inputBinding.binding = 0;
+            inputBinding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+            inputBinding.descriptorCount = 1;
+            inputBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo layoutInfo {
+                VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            layoutInfo.bindingCount = 1;
+            layoutInfo.pBindings = &inputBinding;
+            CheckVk(vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr,
+                                                &normalizationDescriptorSetLayout_),
+                    "vkCreateDescriptorSetLayout(normalization)");
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo {
+                VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &normalizationDescriptorSetLayout_;
+            CheckVk(vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr,
+                                           &normalizationPipelineLayout_),
+                    "vkCreatePipelineLayout(normalization)");
+        }
+
+        VkDescriptorPoolSize poolSize {};
+        poolSize.type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        poolSize.descriptorCount = static_cast<uint32_t>(accumulationImages_.size());
+        VkDescriptorPoolCreateInfo poolInfo {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = static_cast<uint32_t>(accumulationImages_.size());
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        CheckVk(vkCreateDescriptorPool(device_, &poolInfo, nullptr,
+                                       &normalizationDescriptorPool_),
+                "vkCreateDescriptorPool(normalization)");
+
+        normalizationDescriptorSets_.resize(accumulationImages_.size());
+        std::vector<VkDescriptorSetLayout> layouts(
+            accumulationImages_.size(), normalizationDescriptorSetLayout_);
+        VkDescriptorSetAllocateInfo allocationInfo {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocationInfo.descriptorPool = normalizationDescriptorPool_;
+        allocationInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+        allocationInfo.pSetLayouts = layouts.data();
+        CheckVk(vkAllocateDescriptorSets(device_, &allocationInfo,
+                                         normalizationDescriptorSets_.data()),
+                "vkAllocateDescriptorSets(normalization)");
+
+        std::vector<VkDescriptorImageInfo> imageInfos(accumulationImages_.size());
+        std::vector<VkWriteDescriptorSet> writes(accumulationImages_.size());
+        for (size_t index = 0; index < accumulationImages_.size(); ++index) {
+            imageInfos[index].imageView = accumulationImages_[index].view;
+            imageInfos[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = normalizationDescriptorSets_[index];
+            writes[index].dstBinding = 0;
+            writes[index].descriptorCount = 1;
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+            writes[index].pImageInfo = &imageInfos[index];
         }
         vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -914,8 +1149,10 @@ private:
 
     void CreateGraphicsPipeline()
     {
-        const std::vector<uint32_t> vertexCode = ReadShaderCode(L"splat.vert.spv");
-        const std::vector<uint32_t> fragmentCode = ReadShaderCode(L"splat.frag.spv");
+        const std::vector<uint32_t> vertexCode = ReadShaderCode(
+            sortFreeEnabled_ ? L"sort_free_splat.vert.spv" : L"splat.vert.spv");
+        const std::vector<uint32_t> fragmentCode = ReadShaderCode(
+            sortFreeEnabled_ ? L"sort_free_splat.frag.spv" : L"splat.frag.spv");
         const VkShaderModule vertexShader = CreateShaderModule(vertexCode);
         VkShaderModule fragmentShader = VK_NULL_HANDLE;
         try {
@@ -963,11 +1200,14 @@ private:
         multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendAttachmentState blendAttachment {};
         blendAttachment.blendEnable = VK_TRUE;
-        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.srcColorBlendFactor = sortFreeEnabled_
+            ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = sortFreeEnabled_
+            ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
         blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.dstAlphaBlendFactor = sortFreeEnabled_
+            ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
         blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
                                          VK_COLOR_COMPONENT_G_BIT |
@@ -996,17 +1236,95 @@ private:
         vkDestroyShaderModule(device_, fragmentShader, nullptr);
         vkDestroyShaderModule(device_, vertexShader, nullptr);
         CheckVk(result, "vkCreateGraphicsPipelines");
+        if (sortFreeEnabled_) CreateNormalizationPipeline();
+    }
+
+    void CreateNormalizationPipeline()
+    {
+        const VkShaderModule vertexShader =
+            CreateShaderModule(ReadShaderCode(L"normalize.vert.spv"));
+        VkShaderModule fragmentShader = VK_NULL_HANDLE;
+        try {
+            fragmentShader = CreateShaderModule(ReadShaderCode(L"normalize.frag.spv"));
+        } catch (...) {
+            vkDestroyShaderModule(device_, vertexShader, nullptr);
+            throw;
+        }
+        std::array<VkPipelineShaderStageCreateInfo, 2> stages {};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vertexShader;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fragmentShader;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vertexInput {
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly {
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport viewport {0.0F, 0.0F, static_cast<float>(swapchainExtent_.width),
+                             static_cast<float>(swapchainExtent_.height), 0.0F, 1.0F};
+        VkRect2D scissor {{0, 0}, swapchainExtent_};
+        VkPipelineViewportStateCreateInfo viewportState {
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+        VkPipelineRasterizationStateCreateInfo rasterization {
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0F;
+        VkPipelineMultisampleStateCreateInfo multisampling {
+            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState colorAttachment {};
+        colorAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                                         VK_COLOR_COMPONENT_G_BIT |
+                                         VK_COLOR_COMPONENT_B_BIT |
+                                         VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo blending {
+            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        blending.attachmentCount = 1;
+        blending.pAttachments = &colorAttachment;
+        VkGraphicsPipelineCreateInfo pipelineInfo {
+            VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+        pipelineInfo.pStages = stages.data();
+        pipelineInfo.pVertexInputState = &vertexInput;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &blending;
+        pipelineInfo.layout = normalizationPipelineLayout_;
+        pipelineInfo.renderPass = renderPass_;
+        pipelineInfo.subpass = 1;
+        const VkResult result = vkCreateGraphicsPipelines(
+            device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+            &normalizationPipeline_);
+        vkDestroyShaderModule(device_, fragmentShader, nullptr);
+        vkDestroyShaderModule(device_, vertexShader, nullptr);
+        CheckVk(result, "vkCreateGraphicsPipelines(normalization)");
     }
 
     void CreateFramebuffers()
     {
         framebuffers_.resize(swapchainImageViews_.size());
         for (size_t index = 0; index < swapchainImageViews_.size(); ++index) {
-            const VkImageView attachment = swapchainImageViews_[index];
+            const std::array<VkImageView, 2> sortFreeAttachments = {
+                sortFreeEnabled_ ? accumulationImages_[index].view : VK_NULL_HANDLE,
+                swapchainImageViews_[index]};
+            const VkImageView sortedAttachment = swapchainImageViews_[index];
             VkFramebufferCreateInfo createInfo {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
             createInfo.renderPass = renderPass_;
-            createInfo.attachmentCount = 1;
-            createInfo.pAttachments = &attachment;
+            createInfo.attachmentCount = sortFreeEnabled_ ? 2U : 1U;
+            createInfo.pAttachments = sortFreeEnabled_ ? sortFreeAttachments.data()
+                                                       : &sortedAttachment;
             createInfo.width = swapchainExtent_.width;
             createInfo.height = swapchainExtent_.height;
             createInfo.layers = 1;
@@ -1043,20 +1361,30 @@ private:
         CheckVk(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer");
         VkCommandBufferBeginInfo beginInfo {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         CheckVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer");
-        constexpr VkClearValue clearColor = {{{0.025F, 0.035F, 0.055F, 1.0F}}};
+        constexpr std::array<float, 3> background = {0.025F, 0.035F, 0.055F};
+        std::array<VkClearValue, 2> clearValues {};
+        if (sortFreeEnabled_) {
+            const float weight = modelMetadata_.weightBackground;
+            clearValues[0].color = {{background[0] * weight,
+                                     background[1] * weight,
+                                     background[2] * weight, weight}};
+        } else {
+            clearValues[0].color =
+                {{background[0], background[1], background[2], 1.0F}};
+        }
         VkRenderPassBeginInfo renderPassInfo {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         renderPassInfo.renderPass = renderPass_;
         renderPassInfo.framebuffer = framebuffers_[imageIndex];
         renderPassInfo.renderArea.extent = swapchainExtent_;
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearColor;
+        renderPassInfo.clearValueCount = sortFreeEnabled_ ? 2U : 1U;
+        renderPassInfo.pClearValues = clearValues.data();
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           graphicsPipeline_);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 0, 1, &descriptorSets_[currentFrame_],
                                 0, nullptr);
-        CameraPushConstants cameraState;
+        CameraPushConstants cameraState {};
         cameraState.viewProjection = camera_.ViewProjection(
             static_cast<float>(swapchainExtent_.width) /
             static_cast<float>(swapchainExtent_.height));
@@ -1072,10 +1400,22 @@ private:
         const auto cameraTarget = camera_.Target();
         cameraState.cameraTargetAndPadding = {cameraTarget[0], cameraTarget[1],
                                               cameraTarget[2], 0.0F};
+        cameraState.sortFreeParameters = {modelMetadata_.sigma, 0.0F, 0.0F, 0.0F};
         vkCmdPushConstants(commandBuffer, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(cameraState), &cameraState);
-        vkCmdDraw(commandBuffer, 6,
-                  static_cast<uint32_t>(sortedGaussianIndices_.size()), 0, 0);
+        const size_t drawCount = sortFreeEnabled_ ? gaussianBuffer_.Count()
+                                                  : sortedGaussianIndices_.size();
+        vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(drawCount), 0, 0);
+        if (sortFreeEnabled_) {
+            vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              normalizationPipeline_);
+            vkCmdBindDescriptorSets(
+                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                normalizationPipelineLayout_, 0, 1,
+                &normalizationDescriptorSets_[imageIndex], 0, nullptr);
+            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        }
         vkCmdEndRenderPass(commandBuffer);
         CheckVk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
     }
@@ -1228,7 +1568,8 @@ private:
                   << " sort_ms=" << lastSortSeconds_ * 1000.0
                   << " upload_ms=" << uploadSeconds_ * 1000.0
                   << " gpu_data_mib="
-                  << static_cast<double>(gaussianBuffer_.SizeBytes()) /
+                  << static_cast<double>(gaussianBuffer_.SizeBytes() +
+                                         opacityShBuffer_.SizeBytes()) /
                          (1024.0 * 1024.0)
                   << '\n';
     }
@@ -1247,7 +1588,9 @@ private:
         CleanupSwapchain();
         CreateSwapchain();
         CreateImageViews();
+        if (sortFreeEnabled_) CreateAccumulationResources();
         CreateRenderPass();
+        if (sortFreeEnabled_) CreateNormalizationDescriptorResources();
         CreateGraphicsPipeline();
         CreateFramebuffers();
         CreateCommandBuffers();
@@ -1266,14 +1609,35 @@ private:
             vkDestroyFramebuffer(device_, framebuffer, nullptr);
         }
         framebuffers_.clear();
+        if (normalizationPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, normalizationPipeline_, nullptr);
+            normalizationPipeline_ = VK_NULL_HANDLE;
+        }
         if (graphicsPipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, graphicsPipeline_, nullptr);
             graphicsPipeline_ = VK_NULL_HANDLE;
+        }
+        if (normalizationDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, normalizationDescriptorPool_, nullptr);
+            normalizationDescriptorPool_ = VK_NULL_HANDLE;
+            normalizationDescriptorSets_.clear();
         }
         if (renderPass_ != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device_, renderPass_, nullptr);
             renderPass_ = VK_NULL_HANDLE;
         }
+        for (ImageResource& resource : accumulationImages_) {
+            if (resource.view != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_, resource.view, nullptr);
+            }
+            if (resource.image != VK_NULL_HANDLE) {
+                vkDestroyImage(device_, resource.image, nullptr);
+            }
+            if (resource.memory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, resource.memory, nullptr);
+            }
+        }
+        accumulationImages_.clear();
         for (VkImageView imageView : swapchainImageViews_) {
             vkDestroyImageView(device_, imageView, nullptr);
         }
@@ -1307,12 +1671,20 @@ private:
             if (pipelineLayout_ != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
             }
+            if (normalizationPipelineLayout_ != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device_, normalizationPipelineLayout_, nullptr);
+            }
             if (descriptorSetLayout_ != VK_NULL_HANDLE) {
                 vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
+            }
+            if (normalizationDescriptorSetLayout_ != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device_,
+                                             normalizationDescriptorSetLayout_, nullptr);
             }
             for (SortedIndexBuffer& buffer : sortedIndexBuffers_) {
                 buffer.Reset();
             }
+            opacityShBuffer_.Reset();
             gaussianBuffer_.Reset();
             if (commandPool_ != VK_NULL_HANDLE) {
                 vkDestroyCommandPool(device_, commandPool_, nullptr);
@@ -1336,6 +1708,8 @@ private:
     bool windowClassRegistered_ = false;
     bool framebufferResized_ = false;
     bool smokeTest_ = false;
+    bool sortFreeRequested_ = false;
+    bool sortFreeEnabled_ = false;
     uint32_t presentedFrames_ = 0;
     bool mouseDragging_ = false;
     int lastMouseX_ = 0;
@@ -1357,9 +1731,11 @@ private:
     VkExtent2D swapchainExtent_ {};
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     simple_3dgs::GaussianGpuBuffer gaussianBuffer_;
+    simple_3dgs::OpacityShGpuBuffer opacityShBuffer_;
     std::array<SortedIndexBuffer, kFramesInFlight> sortedIndexBuffers_;
     std::vector<uint32_t> sortedGaussianIndices_;
     simple_3dgs::PlyLoadStatistics loadStatistics_;
+    simple_3dgs::PlyModelMetadata modelMetadata_;
     std::vector<double> frameSeconds_;
     size_t visibleGaussianCount_ = 0;
     double uploadSeconds_ = 0.0;
@@ -1371,6 +1747,12 @@ private:
     std::array<VkDescriptorSet, kFramesInFlight> descriptorSets_ {};
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout normalizationDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool normalizationDescriptorPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> normalizationDescriptorSets_;
+    VkPipelineLayout normalizationPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline normalizationPipeline_ = VK_NULL_HANDLE;
+    std::vector<ImageResource> accumulationImages_;
     std::vector<VkFramebuffer> framebuffers_;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;

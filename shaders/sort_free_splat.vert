@@ -12,8 +12,12 @@ layout(std430, set = 0, binding = 0) readonly buffer GaussianBuffer {
     Gaussian gaussians[];
 };
 
-layout(std430, set = 0, binding = 1) readonly buffer SortedGaussianIndexBuffer {
-    uint sortedGaussianIndices[];
+struct OpacitySh {
+    vec4 coefficients[4];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer OpacityShBuffer {
+    OpacitySh opacityShData[];
 };
 
 layout(push_constant) uniform CameraState {
@@ -26,6 +30,7 @@ layout(push_constant) uniform CameraState {
 
 layout(location = 0) out vec2 localPosition;
 layout(location = 1) out vec4 splatColor;
+layout(location = 2) out float lcWeight;
 
 const vec2 corners[6] = vec2[](
     vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
@@ -198,9 +203,73 @@ vec3 evaluateShColor(uint gaussianIndex, int degree, vec3 direction)
     return max(result + vec3(0.5), vec3(0.0));
 }
 
+float readOpacityShCoefficient(uint gaussianIndex, int coefficient)
+{
+    return opacityShData[gaussianIndex]
+        .coefficients[coefficient / 4][coefficient % 4];
+}
+
+float evaluateOpacitySh(uint gaussianIndex, int degree, vec3 direction)
+{
+    const float C0 = 0.28209479177387814;
+    const float C1 = 0.4886025119029199;
+    const float C2_0 = 1.0925484305920792;
+    const float C2_1 = -1.0925484305920792;
+    const float C2_2 = 0.31539156525252005;
+    const float C2_3 = -1.0925484305920792;
+    const float C2_4 = 0.5462742152960396;
+    const float C3_0 = -0.5900435899266435;
+    const float C3_1 = 2.890611442640554;
+    const float C3_2 = -0.4570457994644658;
+    const float C3_3 = 0.3731763325901154;
+    const float C3_4 = -0.4570457994644658;
+    const float C3_5 = 1.445305721320277;
+    const float C3_6 = -0.5900435899266435;
+
+    float x = direction.x;
+    float y = direction.y;
+    float z = direction.z;
+    float result = C0 * readOpacityShCoefficient(gaussianIndex, 0);
+    if (degree > 0) {
+        result += -C1 * y * readOpacityShCoefficient(gaussianIndex, 1) +
+                  C1 * z * readOpacityShCoefficient(gaussianIndex, 2) -
+                  C1 * x * readOpacityShCoefficient(gaussianIndex, 3);
+    }
+    if (degree > 1) {
+        float xx = x * x;
+        float yy = y * y;
+        float zz = z * z;
+        result += C2_0 * x * y * readOpacityShCoefficient(gaussianIndex, 4) +
+                  C2_1 * y * z * readOpacityShCoefficient(gaussianIndex, 5) +
+                  C2_2 * (2.0 * zz - xx - yy) *
+                      readOpacityShCoefficient(gaussianIndex, 6) +
+                  C2_3 * x * z * readOpacityShCoefficient(gaussianIndex, 7) +
+                  C2_4 * (xx - yy) * readOpacityShCoefficient(gaussianIndex, 8);
+    }
+    if (degree > 2) {
+        float xx = x * x;
+        float yy = y * y;
+        float zz = z * z;
+        result += C3_0 * y * (3.0 * xx - yy) *
+                      readOpacityShCoefficient(gaussianIndex, 9) +
+                  C3_1 * x * y * z * readOpacityShCoefficient(gaussianIndex, 10) +
+                  C3_2 * y * (4.0 * zz - xx - yy) *
+                      readOpacityShCoefficient(gaussianIndex, 11) +
+                  C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) *
+                      readOpacityShCoefficient(gaussianIndex, 12) +
+                  C3_4 * x * (4.0 * zz - xx - yy) *
+                      readOpacityShCoefficient(gaussianIndex, 13) +
+                  C3_5 * z * (xx - yy) *
+                      readOpacityShCoefficient(gaussianIndex, 14) +
+                  C3_6 * x * (xx - 3.0 * yy) *
+                      readOpacityShCoefficient(gaussianIndex, 15);
+    }
+    return result;
+}
+
 void main()
 {
-    uint gaussianIndex = sortedGaussianIndices[gl_InstanceIndex];
+    uint gaussianIndex = gl_InstanceIndex;
     Gaussian gaussian = gaussians[gaussianIndex];
     vec2 corner = corners[gl_VertexIndex];
     vec4 center = camera.viewProjection * vec4(gaussian.positionOpacity.xyz, 1.0);
@@ -211,6 +280,7 @@ void main()
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         localPosition = corner;
         splatColor = vec4(0.0);
+        lcWeight = 0.0;
         return;
     }
 
@@ -227,13 +297,16 @@ void main()
     gl_Position.xy += ndcOffset * center.w;
     localPosition = corner;
     int shDegree = int(round(gaussian.color.a));
+    vec3 cameraToGaussian = gaussian.positionOpacity.xyz -
+                            camera.cameraPosition.xyz;
+    vec3 viewDirection = cameraToGaussian /
+                         max(length(cameraToGaussian), 1.0e-6);
     vec3 color = gaussian.color.rgb;
     if (shDegree >= 0) {
-        vec3 cameraToGaussian = gaussian.positionOpacity.xyz -
-                                camera.cameraPosition.xyz;
-        vec3 viewDirection = cameraToGaussian /
-                             max(length(cameraToGaussian), 1.0e-6);
         color = evaluateShColor(gaussianIndex, shDegree, viewDirection);
     }
+    float vi = evaluateOpacitySh(gaussianIndex, max(shDegree, 0), viewDirection);
+    float sigma = max(camera.sortFreeParameters.x, 1.0e-6);
+    lcWeight = max(0.0, 1.0 - centerInCamera.z / sigma) * vi;
     splatColor = vec4(color, gaussian.positionOpacity.w);
 }
