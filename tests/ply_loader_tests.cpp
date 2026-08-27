@@ -150,6 +150,22 @@ void TestRejectsMissingPosition()
     Require(rejected, "missing z property must be rejected");
 }
 
+void TestBatchBoundaries()
+{
+    const std::filesystem::path file =
+        std::filesystem::path(SIMPLE_3DGS_TEST_DATA_DIR) / "gaussians_ascii.ply";
+    std::vector<simple_3dgs::Gaussian> collected;
+    const auto statistics = simple_3dgs::PlyLoader::LoadBatches(
+        file, 2, [&](const simple_3dgs::Gaussian* values, size_t count) {
+            collected.insert(collected.end(), values, values + count);
+        });
+    Require(statistics.gaussianCount == 3, "batch gaussian count");
+    Require(statistics.batchCount == 2, "batch count");
+    Require(collected.size() == 3, "batch callback count");
+    RequireNear(collected.front().position[0], -1.4F, "batch first record");
+    RequireNear(collected.back().position[0], 1.4F, "batch last record");
+}
+
 } // namespace
 
 int main()
@@ -159,6 +175,7 @@ int main()
         TestBinarySh(false);
         TestBinarySh(true);
         TestRejectsMissingPosition();
+        TestBatchBoundaries();
         std::cout << "PLY loader tests passed\n";
         return 0;
     } catch (const std::exception& error) {

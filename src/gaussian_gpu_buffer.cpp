@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace simple_3dgs {
 namespace {
@@ -187,24 +186,22 @@ void GaussianGpuBuffer::Upload(VkPhysicalDevice physicalDevice, VkDevice device,
         return;
     }
 
-    std::vector<GpuGaussian> gpuGaussians;
-    gpuGaussians.reserve(gaussians.size());
-    for (const Gaussian& gaussian : gaussians) {
-        gpuGaussians.push_back(ToGpuGaussian(gaussian));
-    }
-    const VkDeviceSize size = sizeof(GpuGaussian) * gpuGaussians.size();
+    const VkDeviceSize size = sizeof(GpuGaussian) * gaussians.size();
     TemporaryBuffer staging = CreateBuffer(
         physicalDevice, device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     void* mapped = nullptr;
     CheckVk(vkMapMemory(device, staging.memory, 0, size, 0, &mapped), "vkMapMemory");
-    std::memcpy(mapped, gpuGaussians.data(), static_cast<size_t>(size));
+    auto* destination = static_cast<GpuGaussian*>(mapped);
+    for (size_t index = 0; index < gaussians.size(); ++index) {
+        destination[index] = ToGpuGaussian(gaussians[index]);
+    }
     vkUnmapMemory(device, staging.memory);
 
     TemporaryBuffer uploaded = CreateBuffer(
         physicalDevice, device, size,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     CopyBuffer(device, commandPool, transferQueue, staging.buffer, uploaded.buffer, size);
 

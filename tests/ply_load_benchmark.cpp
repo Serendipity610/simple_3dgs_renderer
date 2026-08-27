@@ -19,7 +19,8 @@ int main(int argumentCount, char** arguments)
     try {
         const std::filesystem::path path = arguments[1];
         const auto start = std::chrono::steady_clock::now();
-        const auto gaussians = simple_3dgs::PlyLoader::Load(path);
+        simple_3dgs::PlyLoadStatistics statistics;
+        const auto gaussians = simple_3dgs::PlyLoader::Load(path, &statistics);
         const auto elapsed = std::chrono::steady_clock::now() - start;
 
         std::array<float, 3> minimum {
@@ -46,8 +47,18 @@ int main(int argumentCount, char** arguments)
         std::cout << std::fixed << std::setprecision(3)
                   << "file_bytes=" << std::filesystem::file_size(path) << '\n'
                   << "gaussian_count=" << gaussians.size() << '\n'
+                  << "loader_path=" << statistics.path << '\n'
+                  << "batch_count=" << statistics.batchCount << '\n'
+                  << "header_seconds=" << statistics.headerSeconds << '\n'
+                  << "data_seconds=" << statistics.dataSeconds << '\n'
                   << "parse_seconds="
-                  << std::chrono::duration<double>(elapsed).count() << '\n';
+                  << std::chrono::duration<double>(elapsed).count() << '\n'
+                  << "throughput_mib_per_second="
+                  << (static_cast<double>(statistics.fileBytes) / (1024.0 * 1024.0)) /
+                         std::max(statistics.dataSeconds, 1.0e-9) << '\n'
+                  << "cpu_gaussian_mib="
+                  << static_cast<double>(gaussians.size() * sizeof(simple_3dgs::Gaussian)) /
+                         (1024.0 * 1024.0) << '\n';
         if (!gaussians.empty()) {
             std::cout << "position_min=" << minimum[0] << ',' << minimum[1] << ','
                       << minimum[2] << '\n'

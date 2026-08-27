@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -97,15 +98,12 @@ public:
     void Upload(VkPhysicalDevice physicalDevice, VkDevice device,
                 const std::vector<uint32_t>& indices)
     {
-        if (indices.empty()) {
-            Reset();
-            return;
-        }
-        if (device_ != device || count_ != indices.size()) {
+        const size_t requiredCount = std::max<size_t>(indices.size(), 1);
+        if (device_ != device || capacity_ < requiredCount) {
             Reset();
             device_ = device;
             const VkDeviceSize size =
-                sizeof(uint32_t) * static_cast<VkDeviceSize>(indices.size());
+                sizeof(uint32_t) * static_cast<VkDeviceSize>(requiredCount);
             VkBufferCreateInfo bufferInfo {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bufferInfo.size = size;
             bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -126,19 +124,25 @@ public:
                     "vkAllocateMemory");
             CheckVk(vkBindBufferMemory(device_, buffer_, memory_, 0),
                     "vkBindBufferMemory");
+            CheckVk(vkMapMemory(device_, memory_, 0, size, 0, &mapped_),
+                    "vkMapMemory(sorted indices)");
             sizeBytes_ = size;
-            count_ = indices.size();
+            capacity_ = requiredCount;
         }
 
-        void* mapped = nullptr;
-        CheckVk(vkMapMemory(device_, memory_, 0, sizeBytes_, 0, &mapped),
-                "vkMapMemory");
-        std::memcpy(mapped, indices.data(), static_cast<size_t>(sizeBytes_));
-        vkUnmapMemory(device_, memory_);
+        if (indices.empty()) {
+            *static_cast<uint32_t*>(mapped_) = 0;
+        } else {
+            std::memcpy(mapped_, indices.data(), indices.size() * sizeof(uint32_t));
+        }
     }
 
     void Reset() noexcept
     {
+        if (mapped_ != nullptr) {
+            vkUnmapMemory(device_, memory_);
+            mapped_ = nullptr;
+        }
         if (buffer_ != VK_NULL_HANDLE) {
             vkDestroyBuffer(device_, buffer_, nullptr);
         }
@@ -149,7 +153,7 @@ public:
         buffer_ = VK_NULL_HANDLE;
         memory_ = VK_NULL_HANDLE;
         sizeBytes_ = 0;
-        count_ = 0;
+        capacity_ = 0;
     }
 
     [[nodiscard]] VkBuffer Buffer() const noexcept { return buffer_; }
@@ -160,7 +164,8 @@ private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkDeviceSize sizeBytes_ = 0;
-    size_t count_ = 0;
+    size_t capacity_ = 0;
+    void* mapped_ = nullptr;
 };
 
 class VulkanApplication {
@@ -319,8 +324,11 @@ private:
         CreateImageViews();
         CreateRenderPass();
         CreateCommandPool();
+        const auto uploadStart = std::chrono::steady_clock::now();
         gaussianBuffer_.Upload(physicalDevice_, device_, commandPool_, graphicsQueue_,
                                gaussians_);
+        uploadSeconds_ = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - uploadStart).count();
         RebuildSortedGaussianIndices();
         for (size_t index = 0; index < kFramesInFlight; ++index) {
             sortedIndexBuffers_[index].Upload(physicalDevice_, device_,
@@ -342,6 +350,7 @@ private:
 
     void RebuildSortedGaussianIndices()
     {
+        const auto sortStart = std::chrono::steady_clock::now();
         struct DepthIndex {
             uint32_t index = 0;
             float depth = 0.0F;
@@ -369,6 +378,9 @@ private:
         std::vector<DepthIndex> depthIndices;
         depthIndices.reserve(gaussians_.size());
         for (size_t index = 0; index < gaussians_.size(); ++index) {
+            if (gaussians_[index].opacity < -9.0F) {
+                continue;
+            }
             const auto& position = gaussians_[index].position;
             const std::array<float, 3> cameraToGaussian {
                 position[0] - cameraPosition[0],
@@ -379,8 +391,9 @@ private:
                 cameraToGaussian[0] * viewDirection[0] +
                 cameraToGaussian[1] * viewDirection[1] +
                 cameraToGaussian[2] * viewDirection[2];
-            depthIndices.push_back(
-                {static_cast<uint32_t>(index), depth});
+            if (depth > 0.001F) {
+                depthIndices.push_back({static_cast<uint32_t>(index), depth});
+            }
         }
         std::sort(depthIndices.begin(), depthIndices.end(),
                   [](const DepthIndex& left, const DepthIndex& right) {
@@ -395,6 +408,9 @@ private:
             sortedGaussianIndices_[index] = depthIndices[index].index;
         }
         sortedGaussianIndicesValid_ = true;
+        visibleGaussianCount_ = sortedGaussianIndices_.size();
+        lastSortSeconds_ = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - sortStart).count();
     }
 
     void UpdateSortedGaussianIndexBuffer(size_t frameIndex)
@@ -428,7 +444,7 @@ private:
         LocalFree(arguments);
 
         if (plyPath.has_value()) {
-            gaussians_ = simple_3dgs::PlyLoader::Load(*plyPath);
+            gaussians_ = simple_3dgs::PlyLoader::Load(*plyPath, &loadStatistics_);
             if (gaussians_.empty()) {
                 throw std::runtime_error("PLY file contains no vertices");
             }
@@ -575,6 +591,15 @@ private:
             if (!support.formats.empty() && !support.presentModes.empty()) {
                 physicalDevice_ = device;
                 queueFamilies_ = families;
+                VkPhysicalDeviceProperties properties {};
+                vkGetPhysicalDeviceProperties(device, &properties);
+                std::cout << "device name=" << properties.deviceName
+                          << " vulkan=" << VK_VERSION_MAJOR(properties.apiVersion) << '.'
+                          << VK_VERSION_MINOR(properties.apiVersion)
+                          << " max_storage_mib="
+                          << properties.limits.maxStorageBufferRange / (1024 * 1024)
+                          << " timestamps_supported="
+                          << properties.limits.timestampComputeAndGraphics << '\n';
                 return;
             }
         }
@@ -1049,7 +1074,8 @@ private:
                                               cameraTarget[2], 0.0F};
         vkCmdPushConstants(commandBuffer, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(cameraState), &cameraState);
-        vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(gaussianBuffer_.Count()), 0, 0);
+        vkCmdDraw(commandBuffer, 6,
+                  static_cast<uint32_t>(sortedGaussianIndices_.size()), 0, 0);
         vkCmdEndRenderPass(commandBuffer);
         CheckVk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
     }
@@ -1117,6 +1143,7 @@ private:
 
     void DrawFrame()
     {
+        const auto frameStart = std::chrono::steady_clock::now();
         CheckVk(vkWaitForFences(device_, 1, &inFlight_[currentFrame_], VK_TRUE,
                                 UINT64_MAX),
                 "vkWaitForFences");
@@ -1177,6 +1204,33 @@ private:
             PostMessageW(window_, WM_CLOSE, 0, 0);
         }
         currentFrame_ = (currentFrame_ + 1) % kFramesInFlight;
+        frameSeconds_.push_back(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - frameStart).count());
+        if (frameSeconds_.size() == 120) {
+            ReportPerformance();
+            frameSeconds_.clear();
+        }
+    }
+
+    void ReportPerformance() const
+    {
+        std::vector<double> sorted = frameSeconds_;
+        std::sort(sorted.begin(), sorted.end());
+        const double total = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+        const size_t p95Index = std::min(
+            sorted.size() - 1, static_cast<size_t>(sorted.size() * 0.95));
+        std::cout << std::fixed << std::setprecision(3)
+                  << "perf frame_avg_ms=" << total * 1000.0 / sorted.size()
+                  << " frame_p95_ms=" << sorted[p95Index] * 1000.0
+                  << " frame_max_ms=" << sorted.back() * 1000.0
+                  << " visible=" << visibleGaussianCount_
+                  << " total=" << gaussians_.size()
+                  << " sort_ms=" << lastSortSeconds_ * 1000.0
+                  << " upload_ms=" << uploadSeconds_ * 1000.0
+                  << " gpu_data_mib="
+                  << static_cast<double>(gaussianBuffer_.SizeBytes()) /
+                         (1024.0 * 1024.0)
+                  << '\n';
     }
 
     void RecreateSwapchain()
@@ -1305,6 +1359,11 @@ private:
     simple_3dgs::GaussianGpuBuffer gaussianBuffer_;
     std::array<SortedIndexBuffer, kFramesInFlight> sortedIndexBuffers_;
     std::vector<uint32_t> sortedGaussianIndices_;
+    simple_3dgs::PlyLoadStatistics loadStatistics_;
+    std::vector<double> frameSeconds_;
+    size_t visibleGaussianCount_ = 0;
+    double uploadSeconds_ = 0.0;
+    double lastSortSeconds_ = 0.0;
     bool sortedGaussianIndicesValid_ = false;
     std::array<bool, kFramesInFlight> sortedIndexBufferDirty_ {};
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;

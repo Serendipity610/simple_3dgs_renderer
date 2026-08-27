@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -37,6 +38,18 @@ struct Header {
     PlyFormat format = PlyFormat::Ascii;
     bool hasFormat = false;
     std::vector<Element> elements;
+};
+
+enum class VertexOperation : uint8_t {
+    Ignore, PositionX, PositionY, PositionZ, ScaleX, ScaleY, ScaleZ,
+    RotationW, RotationX, RotationY, RotationZ, Opacity, Alpha,
+    ColorR, ColorG, ColorB, ShDc0, ShDc1, ShDc2, ShRest
+};
+
+struct CompiledProperty {
+    const Property* property = nullptr;
+    VertexOperation operation = VertexOperation::Ignore;
+    size_t shRestIndex = 0;
 };
 
 [[nodiscard]] ScalarType ParseScalarType(const std::string& name)
@@ -258,21 +271,9 @@ struct VertexAccumulator {
     std::array<bool, kShCoefficientCount> hasShCoefficient {};
 };
 
-void AssignShRestProperty(VertexAccumulator& vertex, const std::string& name,
-                          double value)
+void AssignShRestProperty(VertexAccumulator& vertex, size_t propertyIndex,
+                          const std::string& name, double value)
 {
-    constexpr size_t kPrefixLength = 7;
-    if (name.size() <= kPrefixLength) {
-        throw std::runtime_error("invalid PLY SH property: " + name);
-    }
-    size_t propertyIndex = 0;
-    for (size_t index = kPrefixLength; index < name.size(); ++index) {
-        const char digit = name[index];
-        if (digit < '0' || digit > '9') {
-            throw std::runtime_error("invalid PLY SH property: " + name);
-        }
-        propertyIndex = propertyIndex * 10 + static_cast<size_t>(digit - '0');
-    }
     constexpr size_t kRestCoefficientsPerChannel = kShCoefficientsPerChannel - 1;
     constexpr size_t kRestCoefficientCount =
         kRestCoefficientsPerChannel * kShChannelCount;
@@ -289,46 +290,65 @@ void AssignShRestProperty(VertexAccumulator& vertex, const std::string& name,
     vertex.hasShCoefficient[targetIndex] = true;
 }
 
-void AssignVertexProperty(VertexAccumulator& vertex, const Property& property, double value)
+[[nodiscard]] CompiledProperty CompileProperty(const Property& property)
 {
     const std::string& name = property.name;
-    if (name == "x" || name == "y" || name == "z") {
-        const size_t index = name == "x" ? 0 : (name == "y" ? 1 : 2);
-        vertex.gaussian.position[index] = ToFloat(value, name);
-        vertex.hasPosition[index] = true;
-    } else if (name == "scale_0" || name == "scale_x") {
-        vertex.gaussian.scale[0] = ToFloat(value, name);
-    } else if (name == "scale_1" || name == "scale_y") {
-        vertex.gaussian.scale[1] = ToFloat(value, name);
-    } else if (name == "scale_2" || name == "scale_z") {
-        vertex.gaussian.scale[2] = ToFloat(value, name);
-    } else if (name == "rot_0" || name == "rotation_w" || name == "rw") {
-        vertex.gaussian.rotation[0] = ToFloat(value, name);
-    } else if (name == "rot_1" || name == "rotation_x" || name == "rx") {
-        vertex.gaussian.rotation[1] = ToFloat(value, name);
-    } else if (name == "rot_2" || name == "rotation_y" || name == "ry") {
-        vertex.gaussian.rotation[2] = ToFloat(value, name);
-    } else if (name == "rot_3" || name == "rotation_z" || name == "rz") {
-        vertex.gaussian.rotation[3] = ToFloat(value, name);
-    } else if (name == "opacity") {
-        vertex.gaussian.opacity = ToFloat(value, name);
-    } else if (name == "alpha") {
-        vertex.gaussian.opacity = NormalizeColor(value, property.valueType, name);
-    } else if (name == "red" || name == "r" || name == "color_0") {
-        vertex.gaussian.color[0] = NormalizeColor(value, property.valueType, name);
-        vertex.hasDirectColor[0] = true;
-    } else if (name == "green" || name == "g" || name == "color_1") {
-        vertex.gaussian.color[1] = NormalizeColor(value, property.valueType, name);
-        vertex.hasDirectColor[1] = true;
-    } else if (name == "blue" || name == "b" || name == "color_2") {
-        vertex.gaussian.color[2] = NormalizeColor(value, property.valueType, name);
-        vertex.hasDirectColor[2] = true;
-    } else if (name == "f_dc_0" || name == "f_dc_1" || name == "f_dc_2") {
-        const size_t channel = static_cast<size_t>(name.back() - '0');
-        vertex.gaussian.shCoefficients[channel] = ToFloat(value, name);
-        vertex.hasShCoefficient[channel] = true;
-    } else if (name.compare(0, 7, "f_rest_") == 0) {
-        AssignShRestProperty(vertex, name, value);
+    if (name == "x") return {&property, VertexOperation::PositionX};
+    if (name == "y") return {&property, VertexOperation::PositionY};
+    if (name == "z") return {&property, VertexOperation::PositionZ};
+    if (name == "scale_0" || name == "scale_x") return {&property, VertexOperation::ScaleX};
+    if (name == "scale_1" || name == "scale_y") return {&property, VertexOperation::ScaleY};
+    if (name == "scale_2" || name == "scale_z") return {&property, VertexOperation::ScaleZ};
+    if (name == "rot_0" || name == "rotation_w" || name == "rw") return {&property, VertexOperation::RotationW};
+    if (name == "rot_1" || name == "rotation_x" || name == "rx") return {&property, VertexOperation::RotationX};
+    if (name == "rot_2" || name == "rotation_y" || name == "ry") return {&property, VertexOperation::RotationY};
+    if (name == "rot_3" || name == "rotation_z" || name == "rz") return {&property, VertexOperation::RotationZ};
+    if (name == "opacity") return {&property, VertexOperation::Opacity};
+    if (name == "alpha") return {&property, VertexOperation::Alpha};
+    if (name == "red" || name == "r" || name == "color_0") return {&property, VertexOperation::ColorR};
+    if (name == "green" || name == "g" || name == "color_1") return {&property, VertexOperation::ColorG};
+    if (name == "blue" || name == "b" || name == "color_2") return {&property, VertexOperation::ColorB};
+    if (name == "f_dc_0") return {&property, VertexOperation::ShDc0};
+    if (name == "f_dc_1") return {&property, VertexOperation::ShDc1};
+    if (name == "f_dc_2") return {&property, VertexOperation::ShDc2};
+    if (name.compare(0, 7, "f_rest_") == 0) {
+        if (name.size() == 7) throw std::runtime_error("invalid PLY SH property: " + name);
+        size_t index = 0;
+        for (size_t i = 7; i < name.size(); ++i) {
+            if (name[i] < '0' || name[i] > '9') throw std::runtime_error("invalid PLY SH property: " + name);
+            index = index * 10 + static_cast<size_t>(name[i] - '0');
+        }
+        return {&property, VertexOperation::ShRest, index};
+    }
+    return {&property, VertexOperation::Ignore};
+}
+
+void ApplyVertexProperty(VertexAccumulator& vertex, const CompiledProperty& compiled,
+                         double value)
+{
+    const Property& property = *compiled.property;
+    const auto valueFloat = [&] { return ToFloat(value, property.name); };
+    switch (compiled.operation) {
+        case VertexOperation::PositionX: vertex.gaussian.position[0] = valueFloat(); vertex.hasPosition[0] = true; break;
+        case VertexOperation::PositionY: vertex.gaussian.position[1] = valueFloat(); vertex.hasPosition[1] = true; break;
+        case VertexOperation::PositionZ: vertex.gaussian.position[2] = valueFloat(); vertex.hasPosition[2] = true; break;
+        case VertexOperation::ScaleX: vertex.gaussian.scale[0] = valueFloat(); break;
+        case VertexOperation::ScaleY: vertex.gaussian.scale[1] = valueFloat(); break;
+        case VertexOperation::ScaleZ: vertex.gaussian.scale[2] = valueFloat(); break;
+        case VertexOperation::RotationW: vertex.gaussian.rotation[0] = valueFloat(); break;
+        case VertexOperation::RotationX: vertex.gaussian.rotation[1] = valueFloat(); break;
+        case VertexOperation::RotationY: vertex.gaussian.rotation[2] = valueFloat(); break;
+        case VertexOperation::RotationZ: vertex.gaussian.rotation[3] = valueFloat(); break;
+        case VertexOperation::Opacity: vertex.gaussian.opacity = valueFloat(); break;
+        case VertexOperation::Alpha: vertex.gaussian.opacity = NormalizeColor(value, property.valueType, property.name); break;
+        case VertexOperation::ColorR: vertex.gaussian.color[0] = NormalizeColor(value, property.valueType, property.name); vertex.hasDirectColor[0] = true; break;
+        case VertexOperation::ColorG: vertex.gaussian.color[1] = NormalizeColor(value, property.valueType, property.name); vertex.hasDirectColor[1] = true; break;
+        case VertexOperation::ColorB: vertex.gaussian.color[2] = NormalizeColor(value, property.valueType, property.name); vertex.hasDirectColor[2] = true; break;
+        case VertexOperation::ShDc0: vertex.gaussian.shCoefficients[0] = valueFloat(); vertex.hasShCoefficient[0] = true; break;
+        case VertexOperation::ShDc1: vertex.gaussian.shCoefficients[1] = valueFloat(); vertex.hasShCoefficient[1] = true; break;
+        case VertexOperation::ShDc2: vertex.gaussian.shCoefficients[2] = valueFloat(); vertex.hasShCoefficient[2] = true; break;
+        case VertexOperation::ShRest: AssignShRestProperty(vertex, compiled.shRestIndex, property.name, value); break;
+        case VertexOperation::Ignore: break;
     }
 }
 
@@ -376,25 +396,56 @@ void AssignVertexProperty(VertexAccumulator& vertex, const Property& property, d
 
 } // namespace
 
-std::vector<Gaussian> PlyLoader::Load(const std::filesystem::path& path)
+PlyLoadStatistics PlyLoader::LoadBatches(const std::filesystem::path& path,
+                                         size_t batchSize,
+                                         const BatchCallback& callback)
 {
+    if (batchSize == 0 || !callback) throw std::invalid_argument("PLY batch size and callback must be valid");
+    PlyLoadStatistics statistics;
+    statistics.fileBytes = static_cast<size_t>(std::filesystem::file_size(path));
+    const auto headerStart = std::chrono::steady_clock::now();
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("failed to open PLY file: " + path.string());
     }
     const Header header = ReadHeader(input);
+    statistics.headerSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - headerStart).count();
     const bool ascii = header.format == PlyFormat::Ascii;
     const bool fileLittleEndian = header.format == PlyFormat::BinaryLittleEndian;
     const bool swapBytes = !ascii && fileLittleEndian != HostIsLittleEndian();
 
-    std::vector<Gaussian> gaussians;
+    const auto dataStart = std::chrono::steady_clock::now();
+    std::vector<Gaussian> batch;
+    batch.reserve(batchSize);
     for (const Element& element : header.elements) {
+        std::vector<CompiledProperty> compiled;
         if (element.name == "vertex") {
-            gaussians.reserve(element.count);
+            compiled.reserve(element.properties.size());
+            for (const Property& property : element.properties) compiled.push_back(CompileProperty(property));
         }
+        const bool nativeFloatVertex = element.name == "vertex" && !ascii &&
+            !swapBytes && std::all_of(element.properties.begin(), element.properties.end(),
+                [](const Property& property) {
+                    return !property.isList && property.valueType == ScalarType::Float32;
+                });
+        std::vector<float> nativeRecord;
+        if (nativeFloatVertex) nativeRecord.resize(element.properties.size());
         for (size_t record = 0; record < element.count; ++record) {
             VertexAccumulator vertex;
-            for (const Property& property : element.properties) {
+            if (nativeFloatVertex) {
+                const size_t bytes = nativeRecord.size() * sizeof(float);
+                input.read(reinterpret_cast<char*>(nativeRecord.data()),
+                           static_cast<std::streamsize>(bytes));
+                if (!input) throw std::runtime_error("unexpected end of binary PLY data");
+                for (size_t propertyIndex = 0; propertyIndex < compiled.size(); ++propertyIndex) {
+                    ApplyVertexProperty(vertex, compiled[propertyIndex],
+                                        nativeRecord[propertyIndex]);
+                }
+            }
+            for (size_t propertyIndex = 0;
+                 !nativeFloatVertex && propertyIndex < element.properties.size();
+                 ++propertyIndex) {
+                const Property& property = element.properties[propertyIndex];
                 const auto readScalar = [&](ScalarType type) {
                     return ascii ? ReadAsciiScalar(input)
                                  : ReadBinaryScalar(input, type, swapBytes);
@@ -407,15 +458,41 @@ std::vector<Gaussian> PlyLoader::Load(const std::filesystem::path& path)
                 } else {
                     const double value = readScalar(property.valueType);
                     if (element.name == "vertex") {
-                        AssignVertexProperty(vertex, property, value);
+                        ApplyVertexProperty(vertex, compiled[propertyIndex], value);
                     }
                 }
             }
             if (element.name == "vertex") {
-                gaussians.push_back(FinishVertex(vertex));
+                batch.push_back(FinishVertex(vertex));
+                ++statistics.gaussianCount;
+                if (batch.size() == batchSize) {
+                    callback(batch.data(), batch.size());
+                    batch.clear();
+                    ++statistics.batchCount;
+                }
             }
         }
     }
+    if (!batch.empty()) { callback(batch.data(), batch.size()); ++statistics.batchCount; }
+    statistics.dataSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - dataStart).count();
+    statistics.path = ascii ? "generic-ascii" :
+        (swapBytes ? "generic-binary-swapped" : "binary-native-float-fast-or-generic");
+    return statistics;
+}
+
+std::vector<Gaussian> PlyLoader::Load(const std::filesystem::path& path)
+{
+    return Load(path, nullptr);
+}
+
+std::vector<Gaussian> PlyLoader::Load(const std::filesystem::path& path,
+                                      PlyLoadStatistics* statistics)
+{
+    std::vector<Gaussian> gaussians;
+    const auto result = LoadBatches(path, 65'536, [&](const Gaussian* values, size_t count) {
+        gaussians.insert(gaussians.end(), values, values + count);
+    });
+    if (statistics != nullptr) *statistics = result;
     return gaussians;
 }
 
