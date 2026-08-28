@@ -305,10 +305,10 @@ void main()
     if (shDegree >= 0) {
         color = evaluateShColor(gaussianIndex, shDegree, viewDirection);
     }
-    float vi = evaluateOpacitySh(gaussianIndex, max(shDegree, 0), viewDirection);
+    float viLogit = evaluateOpacitySh(
+        gaussianIndex, max(shDegree, 0), viewDirection);
+    float vi = 1.0 / (1.0 + exp(-viLogit));
     float sigma = max(camera.sortFreeParameters.x, 1.0e-6);
-    lcWeight = vi > 0.0
-        ? max(0.0, 1.0 - centerInCamera.z / sigma) * vi
-        : 0.0;
+    lcWeight = max(0.0, 1.0 - centerInCamera.z / sigma) * vi;
     splatColor = vec4(color, gaussian.positionOpacity.w);
 }
