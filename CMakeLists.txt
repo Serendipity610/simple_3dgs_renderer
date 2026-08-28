@@ -65,6 +65,7 @@ add_executable(simple_3dgs_engine
     src/main.cpp
     src/vulkan_application.cpp
 )
+set_target_properties(simple_3dgs_engine PROPERTIES WIN32_EXECUTABLE FALSE)
 
 target_compile_definitions(simple_3dgs_engine PRIVATE
     NOMINMAX

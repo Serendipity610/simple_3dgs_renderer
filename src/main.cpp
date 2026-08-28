@@ -6,7 +6,7 @@
 #include <exception>
 #include <iostream>
 
-int wmain()
+int main()
 {
     try {
         simple_3dgs::RunApplication(GetModuleHandleW(nullptr), SW_SHOWDEFAULT);
